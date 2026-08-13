@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Sequence
+import threading
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -75,6 +76,7 @@ class RegisterEngine(Protocol):
         job: Job,
         source: SourceDocument,
         layouts: Sequence[LayoutPreview],
+        progress: Callable[[int, int], None] | None = None,
     ) -> list[RegisterEntry]: ...
 
 
@@ -96,6 +98,33 @@ class ProcessingRepository(Protocol):
 
     def register_entries_for_source(self, source_id: str) -> list[RegisterEntry]: ...
 
+    def set_processing_state(
+        self,
+        *,
+        job_id: str,
+        source_id: str,
+        processing_status: str,
+        processing_error: str | None = None,
+        processed_pages: int | None = None,
+    ) -> bool: ...
+
+
+class ProcessingQueue(Protocol):
+    """Serialize resource-heavy local processing tasks."""
+
+    def run(self, task: Callable[[], None]) -> None: ...
+
+
+class LocalProcessingQueue:
+    """Allow only one local inference pipeline to run at a time."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    def run(self, task: Callable[[], None]) -> None:
+        with self._lock:
+            task()
+
 
 class Processing:
     """Persist neutral predictions produced by a register engine."""
@@ -110,9 +139,60 @@ class Processing:
         if job is None or source is None:
             raise LookupError("source document not found")
         layouts = self._repository.layout_previews_for_source(source_id)
-        entries = self._engine.extract(job=job, source=source, layouts=layouts)
+        entries = self._engine.extract(
+            job=job,
+            source=source,
+            layouts=layouts,
+            progress=lambda completed, _total: self._repository.set_processing_state(
+                job_id=job_id,
+                source_id=source_id,
+                processing_status="running",
+                processed_pages=completed,
+            ),
+        )
         self._repository.replace_register_entries(source_id=source_id, entries=entries)
         return entries
+
+    def queue_source(self, *, job_id: str, source_id: str) -> None:
+        source = self._repository.get_source(job_id=job_id, source_id=source_id)
+        if source is None:
+            raise LookupError("source document not found")
+        if source.processing_status in {"queued", "running"}:
+            raise ValueError("source processing is already active")
+        if not self._repository.set_processing_state(
+            job_id=job_id,
+            source_id=source_id,
+            processing_status="queued",
+            processed_pages=0,
+        ):
+            raise LookupError("source document not found")
+
+    def run_queued_source(self, *, job_id: str, source_id: str) -> None:
+        self._repository.set_processing_state(
+            job_id=job_id,
+            source_id=source_id,
+            processing_status="running",
+            processed_pages=0,
+        )
+        try:
+            entries = self.process_source(job_id=job_id, source_id=source_id)
+            if not entries:
+                raise ValueError("no register entries were detected")
+        except Exception as error:  # noqa: BLE001 - worker failures must be persisted.
+            self._repository.set_processing_state(
+                job_id=job_id,
+                source_id=source_id,
+                processing_status="failed",
+                processing_error=str(error) or type(error).__name__,
+            )
+            return
+        source = self._repository.get_source(job_id=job_id, source_id=source_id)
+        self._repository.set_processing_state(
+            job_id=job_id,
+            source_id=source_id,
+            processing_status="complete",
+            processed_pages=source.page_count if source is not None else 0,
+        )
 
     def entries_for_source(self, source_id: str) -> list[RegisterEntry]:
         return self._repository.register_entries_for_source(source_id)
@@ -202,6 +282,7 @@ class LocalRegisterEngine:
         job: Job,
         source: SourceDocument,
         layouts: Sequence[LayoutPreview],
+        progress: Callable[[int, int], None] | None = None,
     ) -> list[RegisterEntry]:
         if source.polling_district is None:
             raise ValueError("source polling district is not confirmed")
@@ -228,6 +309,8 @@ class LocalRegisterEngine:
                         image=image,
                     )
                 )
+                if progress is not None:
+                    progress(page_number, len(document))
         return entries
 
     def _extract_page(

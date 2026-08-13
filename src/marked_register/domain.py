@@ -29,6 +29,11 @@ class SourceDocument:
     sha256: str
     page_count: int
     polling_district: str | None = None
+    processing_status: Literal[
+        "not_started", "queued", "running", "complete", "failed"
+    ] = "not_started"
+    processing_error: str | None = None
+    processed_pages: int = 0
 
 
 @dataclass(frozen=True, slots=True)

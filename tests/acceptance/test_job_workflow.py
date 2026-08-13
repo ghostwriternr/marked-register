@@ -1,6 +1,7 @@
 import csv
 import json
 import re
+import threading
 from pathlib import Path
 
 import pymupdf
@@ -29,6 +30,34 @@ class SyntheticEntryRecognizer:
     def recognize(self, image, *, detector_label: str) -> EntryRecognition:  # noqa: ANN001
         del image
         return EntryRecognition(elector_number=detector_label, printed_marker=None)
+
+
+class FailingRegisterEngine:
+    def extract(self, *, job, source, layouts, progress=None):  # noqa: ANN001
+        del job, source, layouts, progress
+        raise RuntimeError("Synthetic inference failure")
+
+
+class DeferredProcessingQueue:
+    def __init__(self) -> None:
+        self.tasks = []
+
+    def run(self, task):  # noqa: ANN001
+        self.tasks.append(task)
+
+
+class ProgressPausingEngine:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.resume = threading.Event()
+        self.delegate = synthetic_engine()
+
+    def extract(self, *, job, source, layouts, progress):  # noqa: ANN001
+        progress(1, source.page_count)
+        self.started.set()
+        if not self.resume.wait(timeout=5):
+            raise TimeoutError("test did not release processing")
+        return self.delegate.extract(job=job, source=source, layouts=layouts)
 
 
 def synthetic_engine() -> LocalRegisterEngine:
@@ -301,7 +330,7 @@ def test_confirmed_source_can_be_processed_into_persistent_entries(tmp_path: Pat
     assert "Review entries" in processed_page.text
 
 
-def prepare_processed_job(client: TestClient, tmp_path: Path) -> str:
+def prepare_confirmed_job(client: TestClient, tmp_path: Path) -> str:
     workspace_path = tmp_path / "review-workspace"
     pdf_path = tmp_path / "review-source.pdf"
     synthetic_register_pdf(pdf_path)
@@ -332,6 +361,11 @@ def prepare_processed_job(client: TestClient, tmp_path: Path) -> str:
     )
     assert confirmation_form is not None
     client.post(confirmation_form.group("url"), data={"decision": "confirmed"})
+    return job_url
+
+
+def prepare_processed_job(client: TestClient, tmp_path: Path) -> str:
+    job_url = prepare_confirmed_job(client, tmp_path)
     job_page = client.get(job_url)
     processing_form = re.search(
         r'action="(?P<url>/jobs/[^\"]+/sources/[^\"]+/processing)"',
@@ -695,3 +729,119 @@ def test_export_includes_unresolved_and_excludes_rejected_rows(tmp_path: Path) -
         "rejected_rows": 1,
         "unresolved_rows": 1,
     }
+
+
+def test_processing_failure_is_persisted_and_can_be_retried(tmp_path: Path) -> None:
+    database_path = tmp_path / "application.sqlite"
+    database_url = f"sqlite+pysqlite:///{database_path}"
+
+    with TestClient(
+        create_app(database_url=database_url, register_engine=FailingRegisterEngine())
+    ) as client:
+        job_url = prepare_confirmed_job(client, tmp_path)
+        job_page = client.get(job_url)
+        processing_form = re.search(
+            r'action="(?P<url>/jobs/[^\"]+/sources/[^\"]+/processing)"',
+            job_page.text,
+        )
+        assert processing_form is not None
+        response = client.post(processing_form.group("url"), follow_redirects=False)
+        assert response.status_code == 303
+        failed_page = client.get(response.headers["location"])
+
+    assert "Processing failed" in failed_page.text
+    assert "Synthetic inference failure" in failed_page.text
+    assert "Retry processing" in failed_page.text
+
+    with TestClient(
+        create_app(database_url=database_url, register_engine=synthetic_engine())
+    ) as client:
+        job_page = client.get(job_url)
+        retry_form = re.search(
+            r'action="(?P<url>/jobs/[^\"]+/sources/[^\"]+/processing)"',
+            job_page.text,
+        )
+        assert retry_form is not None
+        client.post(retry_form.group("url"))
+        completed_page = client.get(job_url)
+
+    assert "2 entries ready for review" in completed_page.text
+    assert "Processing failed" not in completed_page.text
+
+
+def test_processing_progress_is_visible_while_background_work_runs(tmp_path: Path) -> None:
+    database_path = tmp_path / "application.sqlite"
+    queue = DeferredProcessingQueue()
+    register_engine = ProgressPausingEngine()
+
+    with TestClient(
+        create_app(
+            database_url=f"sqlite+pysqlite:///{database_path}",
+            register_engine=register_engine,
+            processing_queue=queue,
+        )
+    ) as client:
+        job_url = prepare_confirmed_job(client, tmp_path)
+        job_page = client.get(job_url)
+        processing_form = re.search(
+            r'action="(?P<url>/jobs/[^\"]+/sources/[^\"]+/processing)"',
+            job_page.text,
+        )
+        assert processing_form is not None
+        response = client.post(processing_form.group("url"), follow_redirects=False)
+        assert response.status_code == 303
+        assert "Processing queued" in client.get(job_url).text
+        assert len(queue.tasks) == 1
+
+        worker = threading.Thread(target=queue.tasks[0])
+        worker.start()
+        assert register_engine.started.wait(timeout=2)
+        try:
+            running_page = client.get(job_url)
+            assert "Processing page 1 of 1" in running_page.text
+        finally:
+            register_engine.resume.set()
+            worker.join(timeout=5)
+
+        assert not worker.is_alive()
+        completed_page = client.get(job_url)
+
+    assert "2 entries ready for review" in completed_page.text
+
+
+def test_interrupted_processing_is_recoverable_after_restart(tmp_path: Path) -> None:
+    database_path = tmp_path / "application.sqlite"
+    database_url = f"sqlite+pysqlite:///{database_path}"
+    queue = DeferredProcessingQueue()
+
+    with TestClient(
+        create_app(
+            database_url=database_url,
+            register_engine=synthetic_engine(),
+            processing_queue=queue,
+        )
+    ) as client:
+        job_url = prepare_confirmed_job(client, tmp_path)
+        job_page = client.get(job_url)
+        processing_form = re.search(
+            r'action="(?P<url>/jobs/[^\"]+/sources/[^\"]+/processing)"',
+            job_page.text,
+        )
+        assert processing_form is not None
+        client.post(processing_form.group("url"))
+        assert "Processing queued" in client.get(job_url).text
+
+    with TestClient(
+        create_app(database_url=database_url, register_engine=synthetic_engine())
+    ) as client:
+        recovered_page = client.get(job_url)
+        assert "Processing was interrupted. Retry when ready." in recovered_page.text
+        retry_form = re.search(
+            r'action="(?P<url>/jobs/[^\"]+/sources/[^\"]+/processing)"',
+            recovered_page.text,
+        )
+        assert retry_form is not None
+        client.post(retry_form.group("url"))
+        completed_page = client.get(job_url)
+
+    assert "2 entries ready for review" in completed_page.text

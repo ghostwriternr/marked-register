@@ -108,6 +108,23 @@
                       {% if source_item.entry_count %}
                         <p>{{ source_item.entry_count }} entries ready for review</p>
                         <a href="/jobs/{{ job.id }}/review">Review entries</a>
+                      {% elif source.processing_status == "failed" %}
+                        <p><strong>Processing failed</strong></p>
+                        <p>{{ source.processing_error }}</p>
+                        <form
+                          action="/jobs/{{ job.id }}/sources/{{ source.id }}/processing"
+                          method="post"
+                        >
+                          <button type="submit">Retry processing</button>
+                        </form>
+                      {% elif source.processing_status == "queued" %}
+                        <p>Processing queued</p>
+                      {% elif source.processing_status == "running" %}
+                        {% if source.processed_pages %}
+                          <p>Processing page {{ source.processed_pages }} of {{ source.page_count }}</p>
+                        {% else %}
+                          <p>Starting register processing…</p>
+                        {% endif %}
                       {% else %}
                         <form
                           action="/jobs/{{ job.id }}/sources/{{ source.id }}/processing"

@@ -39,6 +39,9 @@ class SourceDocumentRow(Base):
     sha256: Mapped[str] = mapped_column(String(64))
     page_count: Mapped[int] = mapped_column(Integer)
     polling_district: Mapped[str | None] = mapped_column(String, nullable=True)
+    processing_status: Mapped[str] = mapped_column(String(20), default="not_started")
+    processing_error: Mapped[str | None] = mapped_column(String, nullable=True)
+    processed_pages: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class LayoutPreviewRow(Base):
@@ -135,6 +138,9 @@ class SqlAlchemyJobRepository:
                     sha256=source.sha256,
                     page_count=source.page_count,
                     polling_district=source.polling_district,
+                    processing_status=source.processing_status,
+                    processing_error=source.processing_error,
+                    processed_pages=source.processed_pages,
                 )
             )
             session.commit()
@@ -155,6 +161,9 @@ class SqlAlchemyJobRepository:
                     sha256=row.sha256,
                     page_count=row.page_count,
                     polling_district=row.polling_district,
+                    processing_status=row.processing_status,  # type: ignore[arg-type]
+                    processing_error=row.processing_error,
+                    processed_pages=row.processed_pages,
                 )
                 for row in rows
             ]
@@ -187,6 +196,46 @@ class SqlAlchemyJobRepository:
             )
             session.commit()
             return result.rowcount == 1
+
+    def set_processing_state(
+        self,
+        *,
+        job_id: str,
+        source_id: str,
+        processing_status: str,
+        processing_error: str | None = None,
+        processed_pages: int | None = None,
+    ) -> bool:
+        values: dict[str, object] = {
+            "processing_status": processing_status,
+            "processing_error": processing_error,
+        }
+        if processed_pages is not None:
+            values["processed_pages"] = processed_pages
+        with Session(self._engine) as session:
+            result = session.execute(
+                update(SourceDocumentRow)
+                .where(
+                    SourceDocumentRow.id == source_id,
+                    SourceDocumentRow.job_id == job_id,
+                )
+                .values(**values)
+            )
+            session.commit()
+            return result.rowcount == 1
+
+    def recover_interrupted_processing(self) -> int:
+        with Session(self._engine) as session:
+            result = session.execute(
+                update(SourceDocumentRow)
+                .where(SourceDocumentRow.processing_status.in_(("queued", "running")))
+                .values(
+                    processing_status="failed",
+                    processing_error="Processing was interrupted. Retry when ready.",
+                )
+            )
+            session.commit()
+            return result.rowcount
 
     def replace_layout_previews(
         self,
@@ -386,6 +435,9 @@ def _source_document(row: SourceDocumentRow) -> SourceDocument:
         sha256=row.sha256,
         page_count=row.page_count,
         polling_district=row.polling_district,
+        processing_status=row.processing_status,  # type: ignore[arg-type]
+        processing_error=row.processing_error,
+        processed_pages=row.processed_pages,
     )
 
 

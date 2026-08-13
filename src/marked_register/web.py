@@ -6,7 +6,16 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
@@ -15,8 +24,10 @@ from marked_register.jobs import Jobs, LocalSourceFileStore
 from marked_register.layouts import Layouts, LocalLayoutOverlayStore
 from marked_register.processing import (
     GlmEntryRecognizer,
+    LocalProcessingQueue,
     LocalRegisterEngine,
     Processing,
+    ProcessingQueue,
     RegisterEngine,
     TesseractAnchorDetector,
 )
@@ -31,7 +42,12 @@ from marked_register.sql import SqlAlchemyJobRepository, application_engine, upg
 TEMPLATES = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
 
-def create_app(*, database_url: str, register_engine: RegisterEngine | None = None) -> FastAPI:
+def create_app(
+    *,
+    database_url: str,
+    register_engine: RegisterEngine | None = None,
+    processing_queue: ProcessingQueue | None = None,
+) -> FastAPI:
     """Create the local Marked Register web application."""
     engine = application_engine(database_url)
     jobs = Jobs(SqlAlchemyJobRepository(engine), LocalSourceFileStore())
@@ -41,12 +57,14 @@ def create_app(*, database_url: str, register_engine: RegisterEngine | None = No
         entry_recognizer=GlmEntryRecognizer(),
     )
     processing = Processing(SqlAlchemyJobRepository(engine), resolved_register_engine)
+    resolved_processing_queue = processing_queue or LocalProcessingQueue()
     reviews = Reviews(SqlAlchemyJobRepository(engine))
     exports = Exports(SqlAlchemyJobRepository(engine))
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):  # type: ignore[no-untyped-def]
         upgrade_database(database_url)
+        SqlAlchemyJobRepository(engine).recover_interrupted_processing()
         yield
         engine.dispose()
 
@@ -54,6 +72,7 @@ def create_app(*, database_url: str, register_engine: RegisterEngine | None = No
     app.state.jobs = jobs
     app.state.layouts = layouts
     app.state.processing = processing
+    app.state.processing_queue = resolved_processing_queue
     app.state.reviews = reviews
     app.state.exports = exports
 
@@ -193,13 +212,25 @@ def create_app(*, database_url: str, register_engine: RegisterEngine | None = No
         )
 
     @app.post("/jobs/{job_id}/sources/{source_id}/processing")
-    def process_source(request: Request, job_id: str, source_id: str) -> RedirectResponse:
+    def process_source(
+        request: Request,
+        background_tasks: BackgroundTasks,
+        job_id: str,
+        source_id: str,
+    ) -> RedirectResponse:
         try:
-            request.app.state.processing.process_source(job_id=job_id, source_id=source_id)
+            request.app.state.processing.queue_source(job_id=job_id, source_id=source_id)
         except LookupError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
-        except (RuntimeError, ValueError) as error:
+        except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+        background_tasks.add_task(
+            request.app.state.processing_queue.run,
+            lambda: request.app.state.processing.run_queued_source(
+                job_id=job_id,
+                source_id=source_id,
+            ),
+        )
         return RedirectResponse(
             url=f"/jobs/{job_id}",
             status_code=status.HTTP_303_SEE_OTHER,
