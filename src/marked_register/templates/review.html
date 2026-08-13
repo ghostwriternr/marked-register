@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Review entries · Marked Register</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; background: #f5f5f0; color: #17221b; }
+      main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
+      .progress { font-variant-numeric: tabular-nums; font-weight: 700; }
+      .card { background: white; border: 1px solid #cdd7cf; border-radius: 12px; padding: 1rem; }
+      .crop { width: 100%; min-height: 120px; object-fit: contain; background: #eee; }
+      .status { font-size: 1.4rem; font-weight: 700; }
+      .fields { display: grid; grid-template-columns: 1fr 2fr; gap: 1rem; margin: 1rem 0; }
+      input { width: 100%; box-sizing: border-box; padding: .7rem; font: inherit; }
+      .actions { display: grid; grid-template-columns: repeat(5, 1fr); gap: .5rem; }
+      button { padding: .8rem; font: inherit; cursor: pointer; }
+      kbd { background: #17221b; color: white; border-radius: 4px; padding: .15rem .4rem; }
+      .secondary { margin-top: 1rem; display: flex; gap: 1rem; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p><a href="/jobs/{{ job_id }}">← Job</a></p>
+      <h1>Review entries</h1>
+      <p class="progress">{{ queue.reviewed }} of {{ queue.total }} reviewed</p>
+
+      {% if entry %}
+        <article class="card">
+          <p>Page {{ entry.page_number }} · {{ entry.column }}{{ "%03d"|format(entry.entry_index) }}</p>
+          <h2>Elector {{ effective_elector_number(entry) or "unreadable" }}</h2>
+          {% if entry.crop_relative_path %}
+            <img
+              class="crop"
+              src="/jobs/{{ job_id }}/entries/{{ entry.id }}/entry-crop"
+              alt="Register crop for the current elector"
+            >
+          {% else %}
+            <p>Manually added from page context</p>
+          {% endif %}
+          <p class="status">Prediction: {{ status_label(entry.register_status) }}</p>
+          {% if entry.review_outcome %}
+            <p>
+              Decision: {{ entry.review_outcome|replace("_", " ")|title }}
+              {% if entry.review_outcome != "rejected" %}
+                · Status: {{ status_label(effective_register_status(entry)) }}
+              {% endif %}
+            </p>
+          {% endif %}
+          {% if entry.printed_marker %}<p>Printed marker: {{ entry.printed_marker }}</p>{% endif %}
+          {% if entry.warnings %}<p>Check: {{ entry.warnings|join(", ") }}</p>{% endif %}
+
+          <form id="review-form" action="/jobs/{{ job_id }}/entries/{{ entry.id }}/review" method="post">
+            <div class="fields">
+              <label>
+                Elector number <kbd>E</kbd>
+                <input
+                  id="elector-number"
+                  name="elector_number"
+                  value="{{ effective_elector_number(entry) or '' }}"
+                  autocomplete="off"
+                >
+              </label>
+              <label>
+                Review note <kbd>N</kbd>
+                <input id="review-note" name="note" value="{{ entry.review_note }}" autocomplete="off">
+              </label>
+            </div>
+            <div class="actions">
+              <button id="accept" name="action" value="accept" type="submit">
+                <kbd>Space</kbd> Accept
+              </button>
+              <button name="action" value="voted_in_person" type="submit">
+                <kbd>1</kbd> Voted
+              </button>
+              <button name="action" value="no_in_person_mark" type="submit">
+                <kbd>2</kbd> No mark
+              </button>
+              <button name="action" value="struck_through" type="submit">
+                <kbd>3</kbd> Struck
+              </button>
+              <button name="action" value="unresolved" type="submit">
+                <kbd>4</kbd> Unresolved
+              </button>
+            </div>
+            <div class="secondary">
+              <button name="action" value="reject" type="submit">Reject false row</button>
+              {% if entry.review_outcome %}
+                <button id="undo-decision" name="action" value="undo" type="submit">
+                  <kbd>Backspace</kbd> Undo decision
+                </button>
+              {% elif previous %}
+                <a id="previous-entry" href="/jobs/{{ job_id }}/review?entry_id={{ previous.id }}">
+                  <kbd>Backspace</kbd> Previous
+                </a>
+              {% endif %}
+              {% if layout_preview %}
+                <a
+                  href="/jobs/{{ job_id }}/layout-previews/{{ layout_preview.id }}/layout-preview"
+                  target="_blank"
+                >Full page context</a>
+              {% endif %}
+            </div>
+          </form>
+          <details class="secondary">
+            <summary>Add a missed elector after this row</summary>
+            <form
+              action="/jobs/{{ job_id }}/entries/{{ entry.id }}/manual-entry"
+              method="post"
+            >
+              <label>
+                Elector number
+                <input name="elector_number" autocomplete="off" required>
+              </label>
+              <label>
+                Register status
+                <select name="register_status">
+                  <option value="voted_in_person">Voted in person</option>
+                  <option value="no_in_person_mark">No in-person vote mark found</option>
+                  <option value="struck_through">Struck through</option>
+                </select>
+              </label>
+              <label>
+                Review note
+                <input name="note" autocomplete="off">
+              </label>
+              <button type="submit">Add missed elector</button>
+            </form>
+          </details>
+        </article>
+      {% else %}
+        <section class="card">
+          <h2>Review complete</h2>
+          <p>{{ queue.reviewed }} of {{ queue.total }} reviewed.</p>
+          <p>{{ queue.unresolved }} unresolved · {{ queue.rejected }} rejected</p>
+          <p>Every extracted row now has an explicit human decision.</p>
+        </section>
+      {% endif %}
+    </main>
+    {% if entry %}
+      <script>
+        const form = document.getElementById("review-form");
+        const number = document.getElementById("elector-number");
+        const note = document.getElementById("review-note");
+        function submitAction(action) {
+          const input = document.createElement("input");
+          input.type = "hidden";
+          input.name = "action";
+          input.value = action;
+          form.appendChild(input);
+          form.requestSubmit();
+        }
+        document.addEventListener("keydown", (event) => {
+          if (event.target === number || event.target === note) return;
+          if (event.code === "Space") { event.preventDefault(); submitAction("accept"); }
+          else if (event.key === "1") submitAction("voted_in_person");
+          else if (event.key === "2") submitAction("no_in_person_mark");
+          else if (event.key === "3") submitAction("struck_through");
+          else if (event.key === "4") submitAction("unresolved");
+          else if (event.key.toLowerCase() === "e") { event.preventDefault(); number.focus(); number.select(); }
+          else if (event.key.toLowerCase() === "n") { event.preventDefault(); note.focus(); }
+          else if (event.key === "Backspace") {
+            const undo = document.getElementById("undo-decision");
+            const previous = document.getElementById("previous-entry");
+            if (undo) { event.preventDefault(); submitAction("undo"); }
+            else if (previous) { event.preventDefault(); window.location = previous.href; }
+          }
+        });
+      </script>
+    {% endif %}
+  </body>
+</html>

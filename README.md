@@ -20,8 +20,14 @@ are recorded in [`docs/architecture.md`](docs/architecture.md).
 
 Requires Python 3.12 and `uv`.
 
+The local processing adapter also requires the Tesseract executable. On macOS:
+
 ```bash
-uv sync
+brew install tesseract
+```
+
+```bash
+uv sync --extra local-ai
 uv run pytest
 uv run ruff check .
 ```

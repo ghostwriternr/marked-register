@@ -46,3 +46,36 @@ class LayoutPreview:
     body_y1: int | None
     review_status: Literal["pending", "confirmed", "rejected"] = "pending"
     diagnostic: str | None = None
+
+
+RegisterStatus = Literal[
+    "voted_in_person",
+    "no_in_person_mark",
+    "struck_through",
+    "unresolved",
+]
+ReviewOutcome = Literal["confirmed", "corrected", "unresolved", "rejected"]
+
+
+@dataclass(frozen=True, slots=True)
+class RegisterEntry:
+    """One predicted elector row awaiting a human review decision."""
+
+    id: str
+    source_id: str
+    page_number: int
+    column: Literal["L", "R"]
+    entry_index: int
+    crop_relative_path: Path | None
+    detector_label: str
+    elector_number: str | None
+    printed_marker: str | None
+    register_status: RegisterStatus
+    prediction_reason: str
+    recognizer_model: str
+    warnings: tuple[str, ...] = ()
+    origin: Literal["predicted", "manual"] = "predicted"
+    review_outcome: ReviewOutcome | None = None
+    reviewed_elector_number: str | None = None
+    reviewed_register_status: RegisterStatus | None = None
+    review_note: str = ""

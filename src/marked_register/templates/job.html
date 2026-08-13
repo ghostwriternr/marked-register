@@ -94,7 +94,17 @@
                         </button>
                       </form>
                     {% elif layout_status == "confirmed" %}
-                      <button type="button">Process register</button>
+                      {% if source_item.entry_count %}
+                        <p>{{ source_item.entry_count }} entries ready for review</p>
+                        <a href="/jobs/{{ job.id }}/review">Review entries</a>
+                      {% else %}
+                        <form
+                          action="/jobs/{{ job.id }}/sources/{{ source.id }}/processing"
+                          method="post"
+                        >
+                          <button type="submit">Process register</button>
+                        </form>
+                      {% endif %}
                     {% endif %}
                   </section>
                 {% endif %}

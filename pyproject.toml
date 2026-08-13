@@ -17,9 +17,13 @@ dependencies = [
     "opencv-python-headless>=4.13",
     "pymupdf>=1.26",
     "python-multipart>=0.0.20",
+    "pytesseract>=0.3.13",
     "sqlalchemy>=2.0",
     "uvicorn>=0.35",
 ]
+
+[project.optional-dependencies]
+local-ai = ["mlx-vlm>=0.4.4"]
 
 [project.scripts]
 marked-register = "marked_register.cli:main"
