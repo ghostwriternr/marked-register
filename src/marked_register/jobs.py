@@ -26,6 +26,8 @@ class JobRepository(Protocol):
 
     def sources_for_job(self, job_id: str) -> list[SourceDocument]: ...
 
+    def get_source(self, *, job_id: str, source_id: str) -> SourceDocument | None: ...
+
     def set_polling_district(
         self,
         *,
@@ -118,6 +120,9 @@ class Jobs:
 
     def sources_for_job(self, job_id: str) -> list[SourceDocument]:
         return self._repository.sources_for_job(job_id)
+
+    def get_source(self, *, job_id: str, source_id: str) -> SourceDocument | None:
+        return self._repository.get_source(job_id=job_id, source_id=source_id)
 
     def confirm_polling_district(
         self,

@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import DateTime, Engine, ForeignKey, Integer, String, create_engine, select, update
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
-from marked_register.domain import Job, SourceDocument
+from marked_register.domain import Job, LayoutPreview, SourceDocument
 
 
 class Base(DeclarativeBase):
@@ -36,6 +38,22 @@ class SourceDocumentRow(Base):
     sha256: Mapped[str] = mapped_column(String(64))
     page_count: Mapped[int] = mapped_column(Integer)
     polling_district: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class LayoutPreviewRow(Base):
+    __tablename__ = "layout_previews"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    source_id: Mapped[str] = mapped_column(ForeignKey("source_documents.id"), index=True)
+    page_number: Mapped[int] = mapped_column(Integer)
+    overlay_relative_path: Mapped[str] = mapped_column(String)
+    image_width: Mapped[int] = mapped_column(Integer)
+    image_height: Mapped[int] = mapped_column(Integer)
+    gutter_x: Mapped[int] = mapped_column(Integer)
+    body_y0: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    body_y1: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    review_status: Mapped[str] = mapped_column(String(20), default="pending")
+    diagnostic: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 def application_engine(database_url: str) -> Engine:
@@ -117,6 +135,16 @@ class SqlAlchemyJobRepository:
                 for row in rows
             ]
 
+    def get_source(self, *, job_id: str, source_id: str) -> SourceDocument | None:
+        with Session(self._engine) as session:
+            row = session.scalar(
+                select(SourceDocumentRow).where(
+                    SourceDocumentRow.id == source_id,
+                    SourceDocumentRow.job_id == job_id,
+                )
+            )
+            return None if row is None else _source_document(row)
+
     def set_polling_district(
         self,
         *,
@@ -135,3 +163,104 @@ class SqlAlchemyJobRepository:
             )
             session.commit()
             return result.rowcount == 1
+
+    def replace_layout_previews(
+        self,
+        *,
+        source_id: str,
+        previews: Sequence[LayoutPreview],
+    ) -> None:
+        with Session(self._engine) as session:
+            existing = session.scalars(
+                select(LayoutPreviewRow).where(LayoutPreviewRow.source_id == source_id)
+            )
+            for row in existing:
+                session.delete(row)
+            session.add_all(
+                [
+                    LayoutPreviewRow(
+                        id=preview.id,
+                        source_id=preview.source_id,
+                        page_number=preview.page_number,
+                        overlay_relative_path=str(preview.overlay_relative_path),
+                        image_width=preview.image_width,
+                        image_height=preview.image_height,
+                        gutter_x=preview.gutter_x,
+                        body_y0=preview.body_y0,
+                        body_y1=preview.body_y1,
+                        review_status=preview.review_status,
+                        diagnostic=preview.diagnostic,
+                    )
+                    for preview in previews
+                ]
+            )
+            session.commit()
+
+    def layout_previews_for_source(self, source_id: str) -> list[LayoutPreview]:
+        with Session(self._engine) as session:
+            rows = session.scalars(
+                select(LayoutPreviewRow)
+                .where(LayoutPreviewRow.source_id == source_id)
+                .order_by(LayoutPreviewRow.page_number)
+            )
+            return [_layout_preview(row) for row in rows]
+
+    def get_layout_preview(
+        self,
+        *,
+        job_id: str,
+        preview_id: str,
+    ) -> LayoutPreview | None:
+        with Session(self._engine) as session:
+            row = session.scalar(
+                select(LayoutPreviewRow)
+                .join(SourceDocumentRow, SourceDocumentRow.id == LayoutPreviewRow.source_id)
+                .where(
+                    LayoutPreviewRow.id == preview_id,
+                    SourceDocumentRow.job_id == job_id,
+                )
+            )
+            return None if row is None else _layout_preview(row)
+
+    def set_layout_review_status(
+        self,
+        *,
+        source_id: str,
+        review_status: Literal["confirmed", "rejected"],
+    ) -> int:
+        with Session(self._engine) as session:
+            result = session.execute(
+                update(LayoutPreviewRow)
+                .where(LayoutPreviewRow.source_id == source_id)
+                .values(review_status=review_status)
+            )
+            session.commit()
+            return result.rowcount
+
+
+def _source_document(row: SourceDocumentRow) -> SourceDocument:
+    return SourceDocument(
+        id=row.id,
+        job_id=row.job_id,
+        original_filename=row.original_filename,
+        relative_path=Path(row.relative_path),
+        sha256=row.sha256,
+        page_count=row.page_count,
+        polling_district=row.polling_district,
+    )
+
+
+def _layout_preview(row: LayoutPreviewRow) -> LayoutPreview:
+    return LayoutPreview(
+        id=row.id,
+        source_id=row.source_id,
+        page_number=row.page_number,
+        overlay_relative_path=Path(row.overlay_relative_path),
+        image_width=row.image_width,
+        image_height=row.image_height,
+        gutter_x=row.gutter_x,
+        body_y0=row.body_y0,
+        body_y1=row.body_y1,
+        review_status=row.review_status,  # type: ignore[arg-type]
+        diagnostic=row.diagnostic,
+    )

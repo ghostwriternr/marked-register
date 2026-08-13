@@ -23,12 +23,21 @@
 
         {% if sources %}
           <ul>
-            {% for source in sources %}
+            {% for source_item in sources %}
+              {% set source = source_item.document %}
               <li>
                 <strong>{{ source.original_filename }}</strong>
                 · {{ source.page_count }} page{% if source.page_count != 1 %}s{% endif %}
                 {% if source.polling_district %}
                   · Polling district {{ source.polling_district }}
+                  {% if not source_item.layouts %}
+                    <form
+                      action="/jobs/{{ job.id }}/sources/{{ source.id }}/layout-analysis"
+                      method="post"
+                    >
+                      <button type="submit">Analyse page layouts</button>
+                    </form>
+                  {% endif %}
                 {% else %}
                   · Polling district needs confirmation
                   <form
@@ -46,6 +55,48 @@
                     </label>
                     <button type="submit">Confirm district</button>
                   </form>
+                {% endif %}
+
+                {% if source_item.layouts %}
+                  <section aria-labelledby="layout-heading-{{ source.id }}">
+                    <h3 id="layout-heading-{{ source.id }}">Review page layouts</h3>
+                    {% set layout_status = source_item.layouts[0].review_status %}
+                    {% for layout in source_item.layouts %}
+                      <article>
+                        <h4>Page {{ layout.page_number }}</h4>
+                        {% if layout.review_status == "pending" %}
+                          <p>Awaiting layout confirmation</p>
+                        {% elif layout.review_status == "confirmed" %}
+                          <p>Layout confirmed</p>
+                        {% else %}
+                          <p>Layout rejected</p>
+                        {% endif %}
+                        {% if layout.diagnostic %}
+                          <p>{{ layout.diagnostic }}</p>
+                        {% endif %}
+                        <img
+                          src="/jobs/{{ job.id }}/layout-previews/{{ layout.id }}/layout-preview"
+                          alt="Detected layout for page {{ layout.page_number }}"
+                          width="500"
+                        >
+                      </article>
+                    {% endfor %}
+                    {% if layout_status == "pending" %}
+                      <form
+                        action="/jobs/{{ job.id }}/sources/{{ source.id }}/layout-confirmation"
+                        method="post"
+                      >
+                        <button type="submit" name="decision" value="confirmed">
+                          Confirm layouts
+                        </button>
+                        <button type="submit" name="decision" value="rejected">
+                          Reject layouts
+                        </button>
+                      </form>
+                    {% elif layout_status == "confirmed" %}
+                      <button type="button">Process register</button>
+                    {% endif %}
+                  </section>
                 {% endif %}
               </li>
             {% endfor %}
