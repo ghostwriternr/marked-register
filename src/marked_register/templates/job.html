@@ -11,6 +11,17 @@
       <h1>{{ job.name }}</h1>
       <p>{{ job.workspace_path }}</p>
 
+      {% if exports_available %}
+        <section aria-labelledby="exports-heading">
+          <h2 id="exports-heading">Reviewed exports</h2>
+          <ul>
+            <li><a href="/jobs/{{ job.id }}/exports/all-electors">Download all electors CSV</a></li>
+            <li><a href="/jobs/{{ job.id }}/exports/voted-only">Download voted-only CSV</a></li>
+            <li><a href="/jobs/{{ job.id }}/exports/manifest">Download export manifest</a></li>
+          </ul>
+        </section>
+      {% endif %}
+
       <section aria-labelledby="sources-heading">
         <h2 id="sources-heading">Add marked-register PDFs</h2>
         <form action="/jobs/{{ job.id }}/sources" method="post" enctype="multipart/form-data">

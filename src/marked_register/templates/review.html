@@ -134,6 +134,9 @@
           <p>{{ queue.reviewed }} of {{ queue.total }} reviewed.</p>
           <p>{{ queue.unresolved }} unresolved · {{ queue.rejected }} rejected</p>
           <p>Every extracted row now has an explicit human decision.</p>
+          <form action="/jobs/{{ job_id }}/exports" method="post">
+            <button type="submit">Create reviewed CSV exports</button>
+          </form>
         </section>
       {% endif %}
     </main>

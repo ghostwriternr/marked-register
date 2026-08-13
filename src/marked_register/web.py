@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
+from marked_register.exports import ExportNotReadyError, Exports
 from marked_register.jobs import Jobs, LocalSourceFileStore
 from marked_register.layouts import Layouts, LocalLayoutOverlayStore
 from marked_register.processing import (
@@ -41,6 +42,7 @@ def create_app(*, database_url: str, register_engine: RegisterEngine | None = No
     )
     processing = Processing(SqlAlchemyJobRepository(engine), resolved_register_engine)
     reviews = Reviews(SqlAlchemyJobRepository(engine))
+    exports = Exports(SqlAlchemyJobRepository(engine))
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):  # type: ignore[no-untyped-def]
@@ -53,6 +55,7 @@ def create_app(*, database_url: str, register_engine: RegisterEngine | None = No
     app.state.layouts = layouts
     app.state.processing = processing
     app.state.reviews = reviews
+    app.state.exports = exports
 
     @app.get("/", response_class=HTMLResponse)
     def start_page(request: Request) -> HTMLResponse:
@@ -94,6 +97,7 @@ def create_app(*, database_url: str, register_engine: RegisterEngine | None = No
                     }
                     for source in request.app.state.jobs.sources_for_job(job_id)
                 ],
+                "exports_available": request.app.state.exports.available(job_id),
             },
         )
 
@@ -295,5 +299,34 @@ def create_app(*, database_url: str, register_engine: RegisterEngine | None = No
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         return FileResponse(path, media_type="image/png")
+
+    @app.post("/jobs/{job_id}/exports")
+    def create_exports(request: Request, job_id: str) -> RedirectResponse:
+        try:
+            request.app.state.exports.generate(job_id)
+        except LookupError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ExportNotReadyError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return RedirectResponse(
+            url=f"/jobs/{job_id}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    @app.get("/jobs/{job_id}/exports/{export_name}")
+    def download_export(
+        request: Request,
+        job_id: str,
+        export_name: Literal["all-electors", "voted-only", "manifest"],
+    ) -> FileResponse:
+        try:
+            path = request.app.state.exports.download_path(
+                job_id=job_id,
+                export_name=export_name,
+            )
+        except LookupError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        media_type = "application/json" if path.suffix == ".json" else "text/csv"
+        return FileResponse(path, media_type=media_type, filename=path.name)
 
     return app

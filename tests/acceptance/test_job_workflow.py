@@ -1,3 +1,5 @@
+import csv
+import json
 import re
 from pathlib import Path
 
@@ -540,3 +542,156 @@ def test_reviewer_can_undo_a_previous_decision(tmp_path: Path) -> None:
     assert "0 of 2 reviewed" in reopened_page.text
     assert "Elector 100" in reopened_page.text
     assert "Decision:" not in reopened_page.text
+
+
+def test_exports_are_blocked_until_every_entry_is_reviewed(tmp_path: Path) -> None:
+    database_path = tmp_path / "application.sqlite"
+    app_args = {
+        "database_url": f"sqlite+pysqlite:///{database_path}",
+        "register_engine": synthetic_engine(),
+    }
+
+    with TestClient(create_app(**app_args)) as client:
+        job_url = prepare_processed_job(client, tmp_path)
+        response = client.post(f"{job_url}/exports")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "2 entries still need review"
+
+
+def test_reviewed_job_produces_canonical_and_voted_only_exports(tmp_path: Path) -> None:
+    database_path = tmp_path / "application.sqlite"
+    workspace_path = tmp_path / "review-workspace"
+    app_args = {
+        "database_url": f"sqlite+pysqlite:///{database_path}",
+        "register_engine": synthetic_engine(),
+    }
+
+    with TestClient(create_app(**app_args)) as client:
+        job_url = prepare_processed_job(client, tmp_path)
+        first_page = client.get(f"{job_url}/review")
+        first_form = re.search(
+            r'action="(?P<url>/jobs/[^\"]+/entries/[^\"]+/review)"',
+            first_page.text,
+        )
+        assert first_form is not None
+        response = client.post(
+            first_form.group("url"),
+            data={
+                "action": "voted_in_person",
+                "elector_number": "100/1",
+                "note": "Corrected from page",
+            },
+            follow_redirects=False,
+        )
+        second_page = client.get(response.headers["location"])
+        second_form = re.search(
+            r'action="(?P<url>/jobs/[^\"]+/entries/[^\"]+/review)"',
+            second_page.text,
+        )
+        assert second_form is not None
+        client.post(
+            second_form.group("url"),
+            data={"action": "accept", "elector_number": "101", "note": ""},
+        )
+
+        response = client.post(f"{job_url}/exports", follow_redirects=False)
+        assert response.status_code == 303
+        job_page = client.get(response.headers["location"])
+
+    columns = [
+        "electoral_reference",
+        "polling_district",
+        "elector_number",
+        "register_status",
+        "printed_marker",
+        "review_outcome",
+        "review_note",
+        "source_file",
+        "page_number",
+        "source_entry_id",
+    ]
+    with (workspace_path / "exports" / "all-electors.csv").open(newline="") as file:
+        all_reader = csv.DictReader(file)
+        all_rows = list(all_reader)
+    with (workspace_path / "exports" / "voted-only.csv").open(newline="") as file:
+        voted_reader = csv.DictReader(file)
+        voted_rows = list(voted_reader)
+    manifest = json.loads((workspace_path / "exports" / "manifest.json").read_text())
+
+    assert all_reader.fieldnames == columns
+    assert voted_reader.fieldnames == columns
+    assert [row["electoral_reference"] for row in all_rows] == ["HSLA-100/1", "HSLA-101"]
+    assert [row["register_status"] for row in all_rows] == [
+        "voted_in_person",
+        "no_in_person_mark",
+    ]
+    assert [row["review_outcome"] for row in all_rows] == ["corrected", "confirmed"]
+    assert all_rows[0]["review_note"] == "Corrected from page"
+    assert all(row["source_file"] == "review-source.pdf" for row in all_rows)
+    assert len(voted_rows) == 1
+    assert voted_rows[0]["electoral_reference"] == "HSLA-100/1"
+    assert manifest["schema_version"] == 1
+    assert manifest["review_summary"] == {
+        "extracted_rows": 2,
+        "exported_rows": 2,
+        "rejected_rows": 0,
+        "unresolved_rows": 0,
+    }
+    assert manifest["sources"][0]["sha256"]
+    assert manifest["recognizer_models"] == ["synthetic-recognizer"]
+    assert "Download all electors CSV" in job_page.text
+    assert "Download voted-only CSV" in job_page.text
+    assert "Download export manifest" in job_page.text
+
+
+def test_export_includes_unresolved_and_excludes_rejected_rows(tmp_path: Path) -> None:
+    database_path = tmp_path / "application.sqlite"
+    workspace_path = tmp_path / "review-workspace"
+    app_args = {
+        "database_url": f"sqlite+pysqlite:///{database_path}",
+        "register_engine": synthetic_engine(),
+    }
+
+    with TestClient(create_app(**app_args)) as client:
+        job_url = prepare_processed_job(client, tmp_path)
+        first_page = client.get(f"{job_url}/review")
+        first_form = re.search(
+            r'action="(?P<url>/jobs/[^\"]+/entries/[^\"]+/review)"',
+            first_page.text,
+        )
+        assert first_form is not None
+        response = client.post(
+            first_form.group("url"),
+            data={"action": "unresolved", "elector_number": "100", "note": "Unreadable"},
+            follow_redirects=False,
+        )
+        second_page = client.get(response.headers["location"])
+        second_form = re.search(
+            r'action="(?P<url>/jobs/[^\"]+/entries/[^\"]+/review)"',
+            second_page.text,
+        )
+        assert second_form is not None
+        client.post(
+            second_form.group("url"),
+            data={"action": "reject", "elector_number": "101", "note": "False row"},
+        )
+        client.post(f"{job_url}/exports")
+
+    with (workspace_path / "exports" / "all-electors.csv").open(newline="") as file:
+        rows = list(csv.DictReader(file))
+    with (workspace_path / "exports" / "voted-only.csv").open(newline="") as file:
+        voted_rows = list(csv.DictReader(file))
+    manifest = json.loads((workspace_path / "exports" / "manifest.json").read_text())
+
+    assert len(rows) == 1
+    assert rows[0]["electoral_reference"] == "HSLA-100"
+    assert rows[0]["register_status"] == "unresolved"
+    assert rows[0]["review_outcome"] == "unresolved"
+    assert voted_rows == []
+    assert manifest["review_summary"] == {
+        "extracted_rows": 2,
+        "exported_rows": 1,
+        "rejected_rows": 1,
+        "unresolved_rows": 1,
+    }
