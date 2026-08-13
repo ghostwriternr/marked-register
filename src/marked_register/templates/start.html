@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Marked Register</title>
+  </head>
+  <body>
+    <main>
+      <p>Marked Register</p>
+      <h1>Create a review job</h1>
+      <p>A job keeps source PDFs, review evidence, and exports together on this computer.</p>
+
+      <form action="/jobs" method="post">
+        <label>
+          Job name
+          <input type="text" name="name" autocomplete="off" required>
+        </label>
+        <label>
+          Local job directory
+          <input type="text" name="workspace_path" autocomplete="off" required>
+        </label>
+        <button type="submit">Create job</button>
+      </form>
+    </main>
+  </body>
+</html>

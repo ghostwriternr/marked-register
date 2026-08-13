@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ job.name }} · Marked Register</title>
+  </head>
+  <body>
+    <main>
+      <p>Marked Register</p>
+      <h1>{{ job.name }}</h1>
+      <p>{{ job.workspace_path }}</p>
+
+      <section aria-labelledby="sources-heading">
+        <h2 id="sources-heading">Add marked-register PDFs</h2>
+        <form action="/jobs/{{ job.id }}/sources" method="post" enctype="multipart/form-data">
+          <label>
+            PDF
+            <input type="file" name="pdf" accept="application/pdf,.pdf" required>
+          </label>
+          <button type="submit">Add PDF</button>
+        </form>
+
+        {% if sources %}
+          <ul>
+            {% for source in sources %}
+              <li>
+                <strong>{{ source.original_filename }}</strong>
+                · {{ source.page_count }} page{% if source.page_count != 1 %}s{% endif %}
+                {% if source.polling_district %}
+                  · Polling district {{ source.polling_district }}
+                {% else %}
+                  · Polling district needs confirmation
+                  <form
+                    action="/jobs/{{ job.id }}/sources/{{ source.id }}/polling-district"
+                    method="post"
+                  >
+                    <label>
+                      Polling district
+                      <input
+                        type="text"
+                        name="polling_district"
+                        autocomplete="off"
+                        required
+                      >
+                    </label>
+                    <button type="submit">Confirm district</button>
+                  </form>
+                {% endif %}
+              </li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p>This job does not have any source PDFs yet.</p>
+        {% endif %}
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,16 @@
+.DS_Store
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# All local register data and validation artifacts are sensitive.
+.local/
+jobs/
+runs/
