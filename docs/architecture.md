@@ -22,11 +22,18 @@ storage, and execution choices must not leak into them.
 - A user-selected job directory holds source PDFs, rendered pages, crops,
   diagnostics, and exports as ordinary files.
 - One background job runs at a time because local inference is resource-heavy.
+- Queued, running, page-progress, complete, and failed states persist in SQLite.
+  Interrupted work becomes an explicit retryable failure after restart; retry
+  replaces deterministic artifacts and entry metadata instead of appending rows.
 - GLM-OCR through MLX is the first text recogniser.
 
 Large binary artifacts are not stored in SQLite. Database records reference
 relative artifact paths and content hashes so a job directory remains movable
 and auditable.
+
+Unknown page structures never enter the extraction pipeline silently. Layout
+analysis persists an annotated diagnostic, and only an explicit reviewer
+exclusion lets the remaining confirmed pages of that PDF continue.
 
 ## Deep pipeline seam
 

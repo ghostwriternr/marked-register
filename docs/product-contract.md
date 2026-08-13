@@ -15,7 +15,8 @@ result, and review decision remains on the operator's machine.
 1. Create a persistent job in a user-chosen local directory.
 2. Add one or more marked-register PDFs.
 3. Confirm or correct the detected polling district for every PDF.
-4. Validate annotated page layouts before full processing.
+4. Validate annotated page layouts before full processing; explicitly exclude
+   diagnosed non-register pages.
 5. Process the PDFs into reviewable elector entries.
 6. Review every entry in physical document order.
 7. Confirm, correct, reject, add, or leave entries explicitly unresolved.
@@ -51,6 +52,10 @@ The reviewer can also reject a false row and add a missed elector from page
 context. Every decision is saved immediately. An unresolved decision counts as
 reviewed; an untouched entry does not.
 
+Changing any source, layout, or review decision invalidates previously generated
+exports. The reviewer must complete the review gate again before regenerating
+them.
+
 ## CSV contract
 
 The canonical export contains every reviewed elector. A convenience export uses
@@ -71,6 +76,8 @@ the same columns and includes only `voted_in_person` rows.
 
 Technical evidence, geometry, model versions, source hashes, and diagnostics
 belong in the machine-readable job record rather than the operational CSV.
+The generated JSON manifest records source hashes, recogniser models, review
+counts, row counts, and CSV hashes.
 
 ## Privacy
 

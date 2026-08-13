@@ -146,6 +146,21 @@ def test_reviewer_can_create_and_reopen_a_job(tmp_path: Path) -> None:
     assert workspace_path.is_dir()
 
 
+def test_start_page_lists_recent_jobs_after_restart(tmp_path: Path) -> None:
+    database_path = tmp_path / "application.sqlite"
+    database_url = f"sqlite+pysqlite:///{database_path}"
+
+    with TestClient(create_app(database_url=database_url)) as client:
+        job_url = create_job(client, tmp_path / "hackney-review")
+
+    with TestClient(create_app(database_url=database_url)) as client:
+        start_page = client.get("/")
+
+    assert "Recent jobs" in start_page.text
+    assert f'href="{job_url}"' in start_page.text
+    assert "Hackney review" in start_page.text
+
+
 def test_reviewer_can_add_a_synthetic_register_pdf(tmp_path: Path) -> None:
     database_path = tmp_path / "application.sqlite"
     workspace_path = tmp_path / "hackney-review"
@@ -203,6 +218,37 @@ def test_reviewer_can_confirm_a_source_polling_district(tmp_path: Path) -> None:
 
     assert "Polling district HSLA" in reopened_page.text
     assert "Polling district needs confirmation" not in reopened_page.text
+
+
+def test_browser_form_errors_are_clear_and_recoverable(tmp_path: Path) -> None:
+    database_path = tmp_path / "application.sqlite"
+    workspace_path = tmp_path / "hackney-review"
+    pdf_path = tmp_path / "HSLA.pdf"
+    synthetic_register_pdf(pdf_path)
+
+    with TestClient(create_app(database_url=f"sqlite+pysqlite:///{database_path}")) as client:
+        job_url = create_job(client, workspace_path)
+        with pdf_path.open("rb") as pdf:
+            client.post(
+                f"{job_url}/sources",
+                files={"pdf": (pdf_path.name, pdf, "application/pdf")},
+            )
+        job_page = client.get(job_url)
+        district_form = re.search(
+            r'action="(?P<url>/jobs/[^\"]+/sources/[^\"]+/polling-district)"',
+            job_page.text,
+        )
+        assert district_form is not None
+        response = client.post(
+            district_form.group("url"),
+            data={"polling_district": "   "},
+            headers={"accept": "text/html"},
+        )
+
+    assert response.status_code == 400
+    assert "Could not continue" in response.text
+    assert "Polling district is required" in response.text
+    assert f'href="{job_url}"' in response.text
 
 
 def test_reviewer_can_generate_persistent_layout_previews(tmp_path: Path) -> None:
@@ -977,3 +1023,90 @@ def test_reviewer_can_exclude_a_non_register_page_before_processing(tmp_path: Pa
         completed_page = client.get(job_url)
 
     assert "2 entries ready for review" in completed_page.text
+
+
+def test_review_change_invalidates_previously_generated_exports(tmp_path: Path) -> None:
+    database_path = tmp_path / "application.sqlite"
+    app_args = {
+        "database_url": f"sqlite+pysqlite:///{database_path}",
+        "register_engine": synthetic_engine(),
+    }
+
+    with TestClient(create_app(**app_args)) as client:
+        job_url = prepare_processed_job(client, tmp_path)
+        for expected_number in ("100", "101"):
+            review_page = client.get(f"{job_url}/review")
+            review_form = re.search(
+                r'action="(?P<url>/jobs/[^\"]+/entries/[^\"]+/review)"',
+                review_page.text,
+            )
+            assert review_form is not None
+            client.post(
+                review_form.group("url"),
+                data={
+                    "action": "accept",
+                    "elector_number": expected_number,
+                    "note": "",
+                },
+            )
+        client.post(f"{job_url}/exports")
+        exported_page = client.get(job_url)
+        assert "Download all electors CSV" in exported_page.text
+        completed_review = client.get(f"{job_url}/review")
+        revisit_url = re.search(
+            r'id="revisit-last-entry" href="(?P<url>[^\"]+)"',
+            completed_review.text,
+        )
+        assert revisit_url is not None
+        revisited_page = client.get(revisit_url.group("url"))
+        review_form = re.search(
+            r'action="(?P<url>/jobs/[^\"]+/entries/[^\"]+/review)"',
+            revisited_page.text,
+        )
+        assert review_form is not None
+        client.post(
+            review_form.group("url"),
+            data={"action": "undo", "elector_number": "101", "note": ""},
+        )
+        changed_page = client.get(job_url)
+        stale_download = client.get(f"{job_url}/exports/all-electors")
+
+    assert "Download all electors CSV" not in changed_page.text
+    assert stale_download.status_code == 404
+
+
+def test_export_waits_for_every_source_to_finish_processing(tmp_path: Path) -> None:
+    database_path = tmp_path / "application.sqlite"
+    app_args = {
+        "database_url": f"sqlite+pysqlite:///{database_path}",
+        "register_engine": synthetic_engine(),
+    }
+    second_pdf = tmp_path / "second-source.pdf"
+    synthetic_register_pdf(second_pdf)
+
+    with TestClient(create_app(**app_args)) as client:
+        job_url = prepare_processed_job(client, tmp_path)
+        for expected_number in ("100", "101"):
+            review_page = client.get(f"{job_url}/review")
+            review_form = re.search(
+                r'action="(?P<url>/jobs/[^\"]+/entries/[^\"]+/review)"',
+                review_page.text,
+            )
+            assert review_form is not None
+            client.post(
+                review_form.group("url"),
+                data={
+                    "action": "accept",
+                    "elector_number": expected_number,
+                    "note": "",
+                },
+            )
+        with second_pdf.open("rb") as pdf:
+            client.post(
+                f"{job_url}/sources",
+                files={"pdf": (second_pdf.name, pdf, "application/pdf")},
+            )
+        response = client.post(f"{job_url}/exports")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "1 source still needs processing"

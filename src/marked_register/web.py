@@ -16,7 +16,9 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.exception_handlers import http_exception_handler
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from marked_register.exports import ExportNotReadyError, Exports
@@ -36,6 +38,7 @@ from marked_register.reviews import (
     effective_elector_number,
     effective_register_status,
     status_label,
+    warning_label,
 )
 from marked_register.sql import SqlAlchemyJobRepository, application_engine, upgrade_database
 
@@ -69,6 +72,11 @@ def create_app(
         engine.dispose()
 
     app = FastAPI(title="Marked Register", lifespan=lifespan)
+    app.mount(
+        "/static",
+        StaticFiles(directory=Path(__file__).parent / "static"),
+        name="static",
+    )
     app.state.jobs = jobs
     app.state.layouts = layouts
     app.state.processing = processing
@@ -76,12 +84,27 @@ def create_app(
     app.state.reviews = reviews
     app.state.exports = exports
 
+    @app.exception_handler(HTTPException)
+    async def friendly_http_error(request: Request, error: HTTPException) -> Response:
+        if "text/html" not in request.headers.get("accept", ""):
+            return await http_exception_handler(request, error)
+        job_id = request.path_params.get("job_id")
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="error.html",
+            context={
+                "detail": error.detail,
+                "back_url": f"/jobs/{job_id}" if job_id else "/",
+            },
+            status_code=error.status_code,
+        )
+
     @app.get("/", response_class=HTMLResponse)
     def start_page(request: Request) -> HTMLResponse:
         return TEMPLATES.TemplateResponse(
             request=request,
             name="start.html",
-            context={},
+            context={"recent_jobs": request.app.state.jobs.recent()},
         )
 
     @app.post("/jobs")
@@ -90,7 +113,10 @@ def create_app(
         name: Annotated[str, Form()],
         workspace_path: Annotated[Path, Form()],
     ) -> RedirectResponse:
-        job = request.app.state.jobs.create(name=name, workspace_path=workspace_path)
+        try:
+            job = request.app.state.jobs.create(name=name, workspace_path=workspace_path)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
         return RedirectResponse(
             url=f"/jobs/{job.id}",
             status_code=status.HTTP_303_SEE_OTHER,
@@ -101,22 +127,25 @@ def create_app(
         job = request.app.state.jobs.get(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="Job not found")
+        sources = request.app.state.jobs.sources_for_job(job_id)
+        source_items = [
+            {
+                "document": source,
+                "layouts": request.app.state.layouts.previews_for_source(source.id),
+                "entry_count": len(request.app.state.processing.entries_for_source(source.id)),
+            }
+            for source in sources
+        ]
         return TEMPLATES.TemplateResponse(
             request=request,
             name="job.html",
             context={
                 "job": job,
-                "sources": [
-                    {
-                        "document": source,
-                        "layouts": request.app.state.layouts.previews_for_source(source.id),
-                        "entry_count": len(
-                            request.app.state.processing.entries_for_source(source.id)
-                        ),
-                    }
-                    for source in request.app.state.jobs.sources_for_job(job_id)
-                ],
+                "sources": source_items,
                 "exports_available": request.app.state.exports.available(job_id),
+                "processing_active": any(
+                    source.processing_status in {"queued", "running"} for source in sources
+                ),
             },
         )
 
@@ -136,6 +165,7 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+        request.app.state.exports.invalidate(job_id)
         return RedirectResponse(
             url=f"/jobs/{job_id}",
             status_code=status.HTTP_303_SEE_OTHER,
@@ -158,6 +188,7 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+        request.app.state.exports.invalidate(job_id)
         return RedirectResponse(
             url=f"/jobs/{job_id}",
             status_code=status.HTTP_303_SEE_OTHER,
@@ -171,6 +202,7 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+        request.app.state.exports.invalidate(job_id)
         return RedirectResponse(
             url=f"/jobs/{job_id}",
             status_code=status.HTTP_303_SEE_OTHER,
@@ -206,6 +238,7 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+        request.app.state.exports.invalidate(job_id)
         return RedirectResponse(
             url=f"/jobs/{job_id}",
             status_code=status.HTTP_303_SEE_OTHER,
@@ -224,6 +257,7 @@ def create_app(
             )
         except LookupError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
+        request.app.state.exports.invalidate(job_id)
         return RedirectResponse(
             url=f"/jobs/{job_id}",
             status_code=status.HTTP_303_SEE_OTHER,
@@ -242,6 +276,7 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+        request.app.state.exports.invalidate(job_id)
         background_tasks.add_task(
             request.app.state.processing_queue.run,
             lambda: request.app.state.processing.run_queued_source(
@@ -284,6 +319,7 @@ def create_app(
                 "effective_elector_number": effective_elector_number,
                 "effective_register_status": effective_register_status,
                 "status_label": status_label,
+                "warning_label": warning_label,
             },
         )
 
@@ -308,6 +344,7 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+        request.app.state.exports.invalidate(job_id)
         return RedirectResponse(
             url=f"/jobs/{job_id}/review",
             status_code=status.HTTP_303_SEE_OTHER,
@@ -334,6 +371,7 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+        request.app.state.exports.invalidate(job_id)
         return RedirectResponse(
             url=f"/jobs/{job_id}/review?entry_id={entry.id}",
             status_code=status.HTTP_303_SEE_OTHER,

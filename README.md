@@ -42,5 +42,21 @@ It listens on `127.0.0.1:8000` and stores the application database under
 `.local/` unless `--database` selects another path. Each review job stores its
 sensitive PDFs and artifacts in the directory chosen in the browser.
 
+The reviewer works entirely in the browser: add PDFs, confirm the polling
+district and annotated layouts, run the serialized local processor, validate
+every row with the documented shortcuts, then create the all-elector and
+voted-only CSVs. Processing failures and interrupted runs remain visible and
+retryable after restart.
+
+The operational CSV columns are, in order:
+
+```text
+electoral_reference,polling_district,elector_number,register_status,printed_marker,review_outcome,review_note,source_file,page_number,source_entry_id
+```
+
+An accompanying JSON manifest records provenance and file hashes. Any later
+source, layout, or review change removes the derived exports so stale files
+cannot be downloaded from the application.
+
 No real register PDFs, page images, crops, OCR text, names, or addresses may be
 committed to this repository.

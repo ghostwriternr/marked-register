@@ -17,6 +17,11 @@ _STATUS_LABELS: dict[RegisterStatus, str] = {
     "struck_through": "Struck through",
     "unresolved": "Needs review",
 }
+_WARNING_LABELS = {
+    "elector_number_missing": "Elector number could not be read",
+    "detector_label_mismatch": "Number reader disagreed with the row detector",
+    "possible_missing_row_before": "Possible missed row immediately above — check the full page",
+}
 
 
 class ReviewRepository(Protocol):
@@ -70,6 +75,10 @@ class ReviewQueue:
     @property
     def rejected(self) -> int:
         return sum(entry.review_outcome == "rejected" for entry in self.entries)
+
+    @property
+    def last(self) -> RegisterEntry | None:
+        return self.entries[-1] if self.entries else None
 
 
 class Reviews:
@@ -230,3 +239,8 @@ def effective_register_status(entry: RegisterEntry) -> RegisterStatus:
 def status_label(status: RegisterStatus) -> str:
     """Return the stable user-facing label for a register status."""
     return _STATUS_LABELS[status]
+
+
+def warning_label(warning: str) -> str:
+    """Translate an internal warning into concise reviewer guidance."""
+    return _WARNING_LABELS.get(warning, warning.replace("_", " ").capitalize())

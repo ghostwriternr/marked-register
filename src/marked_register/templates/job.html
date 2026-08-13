@@ -4,15 +4,17 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ job.name }} · Marked Register</title>
+    <link rel="stylesheet" href="/static/app.css">
+    {% if processing_active %}<meta http-equiv="refresh" content="3">{% endif %}
   </head>
   <body>
     <main>
-      <p>Marked Register</p>
+      <a class="brand" href="/">MARKED REGISTER</a>
       <h1>{{ job.name }}</h1>
-      <p>{{ job.workspace_path }}</p>
+      <p class="muted">{{ job.workspace_path }}</p>
 
       {% if exports_available %}
-        <section aria-labelledby="exports-heading">
+        <section class="panel" aria-labelledby="exports-heading">
           <h2 id="exports-heading">Reviewed exports</h2>
           <ul>
             <li><a href="/jobs/{{ job.id }}/exports/all-electors">Download all electors CSV</a></li>
@@ -22,9 +24,9 @@
         </section>
       {% endif %}
 
-      <section aria-labelledby="sources-heading">
+      <section class="panel" aria-labelledby="sources-heading">
         <h2 id="sources-heading">Add marked-register PDFs</h2>
-        <form action="/jobs/{{ job.id }}/sources" method="post" enctype="multipart/form-data">
+        <form class="inline-form" action="/jobs/{{ job.id }}/sources" method="post" enctype="multipart/form-data">
           <label>
             PDF
             <input type="file" name="pdf" accept="application/pdf,.pdf" required>
@@ -33,10 +35,10 @@
         </form>
 
         {% if sources %}
-          <ul>
+          <ul class="source-list">
             {% for source_item in sources %}
               {% set source = source_item.document %}
-              <li>
+              <li class="source-card">
                 <strong>{{ source.original_filename }}</strong>
                 · {{ source.page_count }} page{% if source.page_count != 1 %}s{% endif %}
                 {% if source.polling_district %}
@@ -51,7 +53,7 @@
                   {% endif %}
                 {% else %}
                   · Polling district needs confirmation
-                  <form
+                  <form class="inline-form"
                     action="/jobs/{{ job.id }}/sources/{{ source.id }}/polling-district"
                     method="post"
                   >
@@ -72,6 +74,7 @@
                   <section aria-labelledby="layout-heading-{{ source.id }}">
                     <h3 id="layout-heading-{{ source.id }}">Review page layouts</h3>
                     {% set layout_state = namespace(pending_clean=false, ready=true) %}
+                    <div class="layout-grid">
                     {% for layout in source_item.layouts %}
                       {% if layout.review_status == "pending" %}
                         {% set layout_state.ready = false %}
@@ -79,7 +82,7 @@
                           {% set layout_state.pending_clean = true %}
                         {% endif %}
                       {% endif %}
-                      <article>
+                      <article class="layout-card">
                         <h4>Page {{ layout.page_number }}</h4>
                         {% if layout.review_status == "pending" %}
                           <p>Awaiting layout confirmation</p>
@@ -91,7 +94,7 @@
                           <p>Layout rejected</p>
                         {% endif %}
                         {% if layout.diagnostic %}
-                          <p>{{ layout.diagnostic }}</p>
+                          <p class="warning">{{ layout.diagnostic }}</p>
                           {% if layout.review_status == "pending" %}
                             <form
                               action="/jobs/{{ job.id }}/layout-previews/{{ layout.id }}/exclusion"
@@ -108,6 +111,7 @@
                         >
                       </article>
                     {% endfor %}
+                    </div>
                     {% if layout_state.pending_clean %}
                       <form
                         action="/jobs/{{ job.id }}/sources/{{ source.id }}/layout-confirmation"

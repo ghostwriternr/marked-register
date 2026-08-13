@@ -22,6 +22,8 @@ class JobRepository(Protocol):
 
     def get(self, job_id: str) -> Job | None: ...
 
+    def recent(self, *, limit: int) -> list[Job]: ...
+
     def add_source(self, source: SourceDocument) -> None: ...
 
     def sources_for_job(self, job_id: str) -> list[SourceDocument]: ...
@@ -85,6 +87,9 @@ class Jobs:
 
     def get(self, job_id: str) -> Job | None:
         return self._repository.get(job_id)
+
+    def recent(self, *, limit: int = 10) -> list[Job]:
+        return self._repository.recent(limit=limit)
 
     def add_source(self, *, job_id: str, filename: str, content: bytes) -> SourceDocument:
         job = self.get(job_id)

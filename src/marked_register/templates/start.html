@@ -4,14 +4,16 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Marked Register</title>
+    <link rel="stylesheet" href="/static/app.css">
   </head>
   <body>
     <main>
-      <p>Marked Register</p>
+      <a class="brand" href="/">MARKED REGISTER</a>
       <h1>Create a review job</h1>
-      <p>A job keeps source PDFs, review evidence, and exports together on this computer.</p>
+      <p class="lede">Turn marked-register PDFs into a checked, neutral ledger. Source files,
+        review evidence, and exports stay together on this computer.</p>
 
-      <form action="/jobs" method="post">
+      <form class="panel stack" action="/jobs" method="post">
         <label>
           Job name
           <input type="text" name="name" autocomplete="off" required>
@@ -22,6 +24,20 @@
         </label>
         <button type="submit">Create job</button>
       </form>
+
+      {% if recent_jobs %}
+        <section class="panel" aria-labelledby="recent-jobs-heading">
+          <h2 id="recent-jobs-heading">Recent jobs</h2>
+          <ul>
+            {% for job in recent_jobs %}
+              <li>
+                <a href="/jobs/{{ job.id }}">{{ job.name }}</a>
+                <small>{{ job.workspace_path }}</small>
+              </li>
+            {% endfor %}
+          </ul>
+        </section>
+      {% endif %}
     </main>
   </body>
 </html>

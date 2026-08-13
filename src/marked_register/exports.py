@@ -60,6 +60,16 @@ class Exports:
     def ensure_ready(self, job_id: str) -> None:
         if self._repository.get(job_id) is None:
             raise LookupError("job not found")
+        sources = self._repository.sources_for_job(job_id)
+        remaining_sources = sum(
+            source.processing_status != "complete" for source in sources
+        )
+        if remaining_sources:
+            noun = "source" if remaining_sources == 1 else "sources"
+            verb = "needs" if remaining_sources == 1 else "need"
+            raise ExportNotReadyError(
+                f"{remaining_sources} {noun} still {verb} processing"
+            )
         entries = self._repository.register_entries_for_job(job_id)
         remaining = sum(entry.review_outcome is None for entry in entries)
         if remaining:
@@ -147,6 +157,15 @@ class Exports:
             (export_dir / filename).is_file()
             for filename in ("all-electors.csv", "voted-only.csv", "manifest.json")
         )
+
+    def invalidate(self, job_id: str) -> None:
+        """Remove derived exports after any source or review decision changes."""
+        job = self._repository.get(job_id)
+        if job is None:
+            return
+        export_dir = job.workspace_path / "exports"
+        for filename in ("all-electors.csv", "voted-only.csv", "manifest.json"):
+            (export_dir / filename).unlink(missing_ok=True)
 
     def download_path(
         self,

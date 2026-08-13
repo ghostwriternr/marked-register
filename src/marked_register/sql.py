@@ -127,6 +127,21 @@ class SqlAlchemyJobRepository:
                 created_at=row.created_at,
             )
 
+    def recent(self, *, limit: int) -> list[Job]:
+        with Session(self._engine) as session:
+            rows = session.scalars(
+                select(JobRow).order_by(JobRow.created_at.desc()).limit(limit)
+            )
+            return [
+                Job(
+                    id=row.id,
+                    name=row.name,
+                    workspace_path=Path(row.workspace_path),
+                    created_at=row.created_at,
+                )
+                for row in rows
+            ]
+
     def add_source(self, source: SourceDocument) -> None:
         with Session(self._engine) as session:
             session.add(
