@@ -26,7 +26,7 @@ from marked_register.domain import (
 
 _ELECTOR_RE = re.compile(r"^\s*(?P<elector>\d{1,5}(?:/\d{1,2})?)(?:\s+|[-–—]+|(?=[A-Za-z]))")
 _MARKER_RE = re.compile(r"^(?:\d{1,5}(?:/\d{1,2})?)\s*(?P<marker>@A|[A-Z]{1,3})?\b")
-_ANCHOR_RE = re.compile(r"^\d{1,5}(?:/\d{1,2})?$")
+_ANCHOR_RE = re.compile(r"^\d{1,5}(?:/\d{0,2})?$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,7 +286,9 @@ class LocalRegisterEngine:
     ) -> list[RegisterEntry]:
         if source.polling_district is None:
             raise ValueError("source polling district is not confirmed")
-        if not layouts or any(layout.review_status != "confirmed" for layout in layouts):
+        if not layouts or any(
+            layout.review_status not in {"confirmed", "excluded"} for layout in layouts
+        ):
             raise ValueError("all page layouts must be confirmed before processing")
 
         source_path = (job.workspace_path / source.relative_path).resolve()
@@ -300,6 +302,10 @@ class LocalRegisterEngine:
                 layout = layouts_by_page.get(page_number)
                 if layout is None:
                     raise ValueError(f"confirmed layout missing for page {page_number}")
+                if layout.review_status == "excluded":
+                    if progress is not None:
+                        progress(page_number, len(document))
+                    continue
                 image = _render_page(page, dpi=self._dpi)
                 entries.extend(
                     self._extract_page(
@@ -340,6 +346,7 @@ class LocalRegisterEngine:
                 bbox=(x0, body_y0, min(x1, x0 + band_width), body_y1),
             )
             anchors = _select_anchors(anchors, body_y0=body_y0, body_y1=body_y1)
+            possible_missing_before = _anchors_after_large_gaps(anchors)
             for entry_index, (anchor, crop) in enumerate(
                 _entry_crops(image, anchors=anchors, x0=x0, x1=x1, y0=body_y0, y1=body_y1)
             ):
@@ -349,6 +356,8 @@ class LocalRegisterEngine:
                 )
                 status, reason = analyze_register_status(crop)
                 warnings = list(recognition.warnings)
+                if anchor in possible_missing_before:
+                    warnings.append("possible_missing_row_before")
                 if recognition.elector_number is None:
                     status = "unresolved"
                     reason = "elector_number_not_recognized"
@@ -456,16 +465,164 @@ def _horizontal_mark_present(
 
 
 def _select_anchors(anchors: Sequence[Anchor], *, body_y0: int, body_y1: int) -> list[Anchor]:
-    selected: list[Anchor] = []
+    candidates: list[Anchor] = []
     seen_y: set[int] = set()
     for anchor in sorted(anchors, key=lambda item: item.y_center):
         if not _ANCHOR_RE.fullmatch(anchor.label):
             continue
         if not body_y0 <= anchor.y_center <= body_y1 or anchor.y_center in seen_y:
             continue
-        selected.append(anchor)
+        candidates.append(anchor)
         seen_y.add(anchor.y_center)
-    return selected
+    median_gap = _median_anchor_gap(candidates)
+    candidates = _reject_implausibly_close_anchors(candidates, median_gap=median_gap)
+    median_gap = _median_anchor_gap(candidates)
+    return [
+        candidate
+        for index, candidate in enumerate(candidates)
+        if not _is_isolated_anchor_outlier(index, candidates, median_gap=median_gap)
+    ]
+
+
+def _reject_implausibly_close_anchors(
+    anchors: list[Anchor],
+    *,
+    median_gap: int | None,
+) -> list[Anchor]:
+    if median_gap is None:
+        return anchors
+    kept: list[Anchor] = []
+    index = 0
+    while index < len(anchors):
+        group = [anchors[index]]
+        index += 1
+        while (
+            index < len(anchors)
+            and anchors[index].y_center - group[-1].y_center < median_gap * 0.5
+        ):
+            group.append(anchors[index])
+            index += 1
+        if len(group) == 1:
+            kept.append(group[0])
+            continue
+        chosen = _best_close_anchor(
+            group,
+            previous_anchor=kept[-1] if kept else None,
+            next_anchor=anchors[index] if index < len(anchors) else None,
+        )
+        if chosen is not None:
+            kept.append(chosen)
+    return kept
+
+
+def _best_close_anchor(
+    anchors: list[Anchor],
+    *,
+    previous_anchor: Anchor | None,
+    next_anchor: Anchor | None,
+) -> Anchor | None:
+    scored = [
+        (
+            _sequence_penalty(
+                anchor,
+                previous_anchor=previous_anchor,
+                next_anchor=next_anchor,
+            ),
+            -(anchor.confidence or 0),
+            anchor.y_center,
+            anchor,
+        )
+        for anchor in anchors
+    ]
+    best = min(scored)
+    return None if best[0] > 1000 else best[3]
+
+
+def _sequence_penalty(
+    anchor: Anchor,
+    *,
+    previous_anchor: Anchor | None,
+    next_anchor: Anchor | None,
+) -> int:
+    key = _anchor_sort_key(anchor)
+    if key is None:
+        return 10_000
+    penalty = 0
+    previous_key = _anchor_sort_key(previous_anchor) if previous_anchor is not None else None
+    if previous_key is not None:
+        penalty += abs(key[0] - previous_key[0] - 1)
+    next_key = _anchor_sort_key(next_anchor) if next_anchor is not None else None
+    if next_key is not None:
+        penalty += abs(next_key[0] - key[0] - 1)
+    return penalty
+
+
+def _is_isolated_anchor_outlier(
+    index: int,
+    anchors: list[Anchor],
+    *,
+    median_gap: int | None,
+) -> bool:
+    current = _anchor_sort_key(anchors[index])
+    if current is None or len(anchors) < 2:
+        return False
+    neighboring_bases = _neighboring_anchor_bases(index, anchors)
+    if len(neighboring_bases) < 2:
+        return False
+    if not all(abs(current[0] - base) > 1000 for base in neighboring_bases):
+        return False
+    if median_gap is None:
+        return False
+    gaps: list[int] = []
+    if index > 0:
+        gaps.append(anchors[index].y_center - anchors[index - 1].y_center)
+    if index + 1 < len(anchors):
+        gaps.append(anchors[index + 1].y_center - anchors[index].y_center)
+    return any(gap < median_gap * 0.5 or gap > median_gap * 1.5 for gap in gaps)
+
+
+def _neighboring_anchor_bases(index: int, anchors: list[Anchor]) -> list[int]:
+    bases: list[int] = []
+    for neighbor_index in (index - 1, index + 1, index - 2, index + 2):
+        if not 0 <= neighbor_index < len(anchors):
+            continue
+        key = _anchor_sort_key(anchors[neighbor_index])
+        if key is not None:
+            bases.append(key[0])
+        if len(bases) == 2:
+            break
+    return bases
+
+
+def _median_anchor_gap(anchors: Sequence[Anchor]) -> int | None:
+    if len(anchors) < 2:
+        return None
+    gaps = [
+        after.y_center - before.y_center
+        for before, after in zip(anchors, anchors[1:], strict=False)
+    ]
+    return sorted(gaps)[(len(gaps) - 1) // 2]
+
+
+def _anchors_after_large_gaps(anchors: Sequence[Anchor]) -> set[Anchor]:
+    if len(anchors) < 3:
+        return set()
+    median_gap = _median_anchor_gap(anchors)
+    if median_gap is None:
+        return set()
+    return {
+        after
+        for before, after in zip(anchors, anchors[1:], strict=False)
+        if after.y_center - before.y_center > median_gap * 1.8
+    }
+
+
+def _anchor_sort_key(anchor: Anchor) -> tuple[int, int] | None:
+    label = anchor.label[:-1] if anchor.label.endswith("/") else anchor.label
+    match = re.fullmatch(r"(?P<base>\d{1,5})(?:/(?P<suffix>\d{1,2}))?", label)
+    if match is None:
+        return None
+    return int(match.group("base")), int(match.group("suffix") or 0)
 
 
 def _entry_crops(
@@ -479,7 +636,7 @@ def _entry_crops(
 ):  # type: ignore[no-untyped-def]
     for index, anchor in enumerate(anchors):
         if len(anchors) == 1:
-            half_height = max(40, round(image.shape[0] * 0.018))
+            half_height = max(60, round(image.shape[0] * 0.035))
             crop_y0 = max(y0, anchor.y_center - half_height)
             crop_y1 = min(y1, anchor.y_center + half_height)
         else:

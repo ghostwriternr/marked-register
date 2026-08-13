@@ -211,6 +211,24 @@ def create_app(
             status_code=status.HTTP_303_SEE_OTHER,
         )
 
+    @app.post("/jobs/{job_id}/layout-previews/{preview_id}/exclusion")
+    def exclude_layout_preview(
+        request: Request,
+        job_id: str,
+        preview_id: str,
+    ) -> RedirectResponse:
+        try:
+            request.app.state.layouts.exclude_preview(
+                job_id=job_id,
+                preview_id=preview_id,
+            )
+        except LookupError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return RedirectResponse(
+            url=f"/jobs/{job_id}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
     @app.post("/jobs/{job_id}/sources/{source_id}/processing")
     def process_source(
         request: Request,

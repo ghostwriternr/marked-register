@@ -71,19 +71,35 @@
                 {% if source_item.layouts %}
                   <section aria-labelledby="layout-heading-{{ source.id }}">
                     <h3 id="layout-heading-{{ source.id }}">Review page layouts</h3>
-                    {% set layout_status = source_item.layouts[0].review_status %}
+                    {% set layout_state = namespace(pending_clean=false, ready=true) %}
                     {% for layout in source_item.layouts %}
+                      {% if layout.review_status == "pending" %}
+                        {% set layout_state.ready = false %}
+                        {% if not layout.diagnostic %}
+                          {% set layout_state.pending_clean = true %}
+                        {% endif %}
+                      {% endif %}
                       <article>
                         <h4>Page {{ layout.page_number }}</h4>
                         {% if layout.review_status == "pending" %}
                           <p>Awaiting layout confirmation</p>
                         {% elif layout.review_status == "confirmed" %}
                           <p>Layout confirmed</p>
+                        {% elif layout.review_status == "excluded" %}
+                          <p>Excluded from processing</p>
                         {% else %}
                           <p>Layout rejected</p>
                         {% endif %}
                         {% if layout.diagnostic %}
                           <p>{{ layout.diagnostic }}</p>
+                          {% if layout.review_status == "pending" %}
+                            <form
+                              action="/jobs/{{ job.id }}/layout-previews/{{ layout.id }}/exclusion"
+                              method="post"
+                            >
+                              <button type="submit">Exclude this non-register page</button>
+                            </form>
+                          {% endif %}
                         {% endif %}
                         <img
                           src="/jobs/{{ job.id }}/layout-previews/{{ layout.id }}/layout-preview"
@@ -92,7 +108,7 @@
                         >
                       </article>
                     {% endfor %}
-                    {% if layout_status == "pending" %}
+                    {% if layout_state.pending_clean %}
                       <form
                         action="/jobs/{{ job.id }}/sources/{{ source.id }}/layout-confirmation"
                         method="post"
@@ -104,7 +120,7 @@
                           Reject layouts
                         </button>
                       </form>
-                    {% elif layout_status == "confirmed" %}
+                    {% elif layout_state.ready %}
                       {% if source_item.entry_count %}
                         <p>{{ source_item.entry_count }} entries ready for review</p>
                         <a href="/jobs/{{ job.id }}/review">Review entries</a>

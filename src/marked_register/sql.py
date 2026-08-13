@@ -304,11 +304,34 @@ class SqlAlchemyJobRepository:
         with Session(self._engine) as session:
             result = session.execute(
                 update(LayoutPreviewRow)
-                .where(LayoutPreviewRow.source_id == source_id)
+                .where(
+                    LayoutPreviewRow.source_id == source_id,
+                    LayoutPreviewRow.review_status != "excluded",
+                )
                 .values(review_status=review_status)
             )
             session.commit()
             return result.rowcount
+
+    def set_layout_preview_review_status(
+        self,
+        *,
+        job_id: str,
+        preview_id: str,
+        review_status: str,
+    ) -> bool:
+        source_ids = select(SourceDocumentRow.id).where(SourceDocumentRow.job_id == job_id)
+        with Session(self._engine) as session:
+            result = session.execute(
+                update(LayoutPreviewRow)
+                .where(
+                    LayoutPreviewRow.id == preview_id,
+                    LayoutPreviewRow.source_id.in_(source_ids),
+                )
+                .values(review_status=review_status)
+            )
+            session.commit()
+            return result.rowcount == 1
 
     def replace_register_entries(
         self,

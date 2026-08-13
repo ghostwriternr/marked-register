@@ -49,7 +49,7 @@ class LayoutPreview:
     gutter_x: int
     body_y0: int | None
     body_y1: int | None
-    review_status: Literal["pending", "confirmed", "rejected"] = "pending"
+    review_status: Literal["pending", "confirmed", "rejected", "excluded"] = "pending"
     diagnostic: str | None = None
 
 

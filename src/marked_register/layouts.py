@@ -46,6 +46,14 @@ class LayoutRepository(Protocol):
         review_status: Literal["confirmed", "rejected"],
     ) -> int: ...
 
+    def set_layout_preview_review_status(
+        self,
+        *,
+        job_id: str,
+        preview_id: str,
+        review_status: str,
+    ) -> bool: ...
+
 
 class LayoutOverlayStore(Protocol):
     """Reviewer-facing layout overlay storage."""
@@ -115,13 +123,17 @@ class Layouts:
                     pixmap.n,
                 )
                 image = image.copy()
-                gutter_x = detect_gutter_x(image)
-                diagnostic = None
+                diagnostics: list[str] = []
+                try:
+                    gutter_x = detect_gutter_x(image)
+                except ValueError as error:
+                    gutter_x = image.shape[1] // 2
+                    diagnostics.append(str(error))
                 try:
                     body_y0, body_y1 = detect_entry_body_bounds(image)
                 except ValueError as error:
                     body_y0 = body_y1 = None
-                    diagnostic = str(error)
+                    diagnostics.append(str(error))
                 overlay = draw_layout_overlay(
                     image,
                     gutter_x=gutter_x,
@@ -145,7 +157,7 @@ class Layouts:
                         gutter_x=gutter_x,
                         body_y0=body_y0,
                         body_y1=body_y1,
-                        diagnostic=diagnostic,
+                        diagnostic="; ".join(diagnostics) or None,
                     )
                 )
 
@@ -176,12 +188,32 @@ class Layouts:
             raise LookupError("source document not found")
         if decision not in {"confirmed", "rejected"}:
             raise ValueError("layout decision must be confirmed or rejected")
+        previews = self._repository.layout_previews_for_source(source_id)
+        if decision == "confirmed" and any(
+            preview.diagnostic and preview.review_status != "excluded"
+            for preview in previews
+        ):
+            raise ValueError("resolve layout diagnostics before confirmation")
         updated = self._repository.set_layout_review_status(
             source_id=source_id,
             review_status=decision,
         )
         if updated == 0:
             raise ValueError("analyze page layouts before reviewing them")
+
+    def exclude_preview(self, *, job_id: str, preview_id: str) -> None:
+        preview = self._repository.get_layout_preview(
+            job_id=job_id,
+            preview_id=preview_id,
+        )
+        if preview is None:
+            raise LookupError("layout preview not found")
+        if not self._repository.set_layout_preview_review_status(
+            job_id=job_id,
+            preview_id=preview_id,
+            review_status="excluded",
+        ):
+            raise LookupError("layout preview not found")
 
 
 def detect_gutter_x(

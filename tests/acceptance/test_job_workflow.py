@@ -93,6 +93,28 @@ def synthetic_register_pdf(path: Path) -> None:
     document.close()
 
 
+def structurally_unknown_pdf(path: Path) -> None:
+    document = pymupdf.open()
+    document.new_page(width=595, height=842)
+    document.save(path)
+    document.close()
+
+
+def mixed_structure_pdf(path: Path) -> None:
+    document = pymupdf.open()
+    document.new_page(width=595, height=842)
+    page = document.new_page(width=595, height=842)
+    page.insert_text((48, 48), "SYNTHETIC MARKED REGISTER — DISTRICT HSLA")
+    page.draw_line((30, 100), (565, 100), width=1)
+    page.insert_text((48, 140), "100")
+    page.insert_text((120, 140), "SYNTHETIC ENTRY")
+    page.insert_text((345, 140), "101")
+    page.insert_text((417, 140), "SYNTHETIC ENTRY")
+    page.draw_line((30, 760), (565, 760), width=1)
+    document.save(path)
+    document.close()
+
+
 def test_reviewer_can_open_the_job_start_page(tmp_path: Path) -> None:
     database_path = tmp_path / "application.sqlite"
 
@@ -842,6 +864,116 @@ def test_interrupted_processing_is_recoverable_after_restart(tmp_path: Path) -> 
         )
         assert retry_form is not None
         client.post(retry_form.group("url"))
+        completed_page = client.get(job_url)
+
+    assert "2 entries ready for review" in completed_page.text
+
+
+def test_unknown_page_structure_stops_with_an_annotated_diagnostic(tmp_path: Path) -> None:
+    database_path = tmp_path / "application.sqlite"
+    workspace_path = tmp_path / "unknown-layout"
+    pdf_path = tmp_path / "unknown.pdf"
+    structurally_unknown_pdf(pdf_path)
+
+    with TestClient(create_app(database_url=f"sqlite+pysqlite:///{database_path}")) as client:
+        job_url = create_job(client, workspace_path)
+        with pdf_path.open("rb") as pdf:
+            client.post(
+                f"{job_url}/sources",
+                files={"pdf": (pdf_path.name, pdf, "application/pdf")},
+            )
+        job_page = client.get(job_url)
+        district_form = re.search(
+            r'action="(?P<url>/jobs/[^\"]+/sources/[^\"]+/polling-district)"',
+            job_page.text,
+        )
+        assert district_form is not None
+        client.post(district_form.group("url"), data={"polling_district": "HSLA"})
+        job_page = client.get(job_url)
+        analysis_form = re.search(
+            r'action="(?P<url>/jobs/[^\"]+/sources/[^\"]+/layout-analysis)"',
+            job_page.text,
+        )
+        assert analysis_form is not None
+        response = client.post(analysis_form.group("url"), follow_redirects=False)
+        assert response.status_code == 303
+        diagnostic_page = client.get(response.headers["location"])
+        confirmation_url = analysis_form.group("url").replace(
+            "/layout-analysis",
+            "/layout-confirmation",
+        )
+        response = client.post(
+            confirmation_url,
+            data={"decision": "confirmed"},
+        )
+
+    assert "cannot detect a two-column gutter" in diagnostic_page.text
+    assert "entry-body rules were not detected" in diagnostic_page.text
+    assert "Exclude this non-register page" in diagnostic_page.text
+    assert "Process register" not in diagnostic_page.text
+    assert response.status_code == 400
+    assert response.json()["detail"] == "resolve layout diagnostics before confirmation"
+
+
+def test_reviewer_can_exclude_a_non_register_page_before_processing(tmp_path: Path) -> None:
+    database_path = tmp_path / "application.sqlite"
+    workspace_path = tmp_path / "mixed-layout"
+    pdf_path = tmp_path / "mixed.pdf"
+    mixed_structure_pdf(pdf_path)
+    app_args = {
+        "database_url": f"sqlite+pysqlite:///{database_path}",
+        "register_engine": synthetic_engine(),
+    }
+
+    with TestClient(create_app(**app_args)) as client:
+        job_url = create_job(client, workspace_path)
+        with pdf_path.open("rb") as pdf:
+            client.post(
+                f"{job_url}/sources",
+                files={"pdf": (pdf_path.name, pdf, "application/pdf")},
+            )
+        job_page = client.get(job_url)
+        district_form = re.search(
+            r'action="(?P<url>/jobs/[^\"]+/sources/[^\"]+/polling-district)"',
+            job_page.text,
+        )
+        assert district_form is not None
+        client.post(district_form.group("url"), data={"polling_district": "HSLA"})
+        job_page = client.get(job_url)
+        analysis_form = re.search(
+            r'action="(?P<url>/jobs/[^\"]+/sources/[^\"]+/layout-analysis)"',
+            job_page.text,
+        )
+        assert analysis_form is not None
+        client.post(analysis_form.group("url"))
+        job_page = client.get(job_url)
+        exclusion_form = re.search(
+            r'action="(?P<url>/jobs/[^\"]+/layout-previews/[^\"]+/exclusion)"',
+            job_page.text,
+        )
+        assert exclusion_form is not None
+        response = client.post(exclusion_form.group("url"), follow_redirects=False)
+        assert response.status_code == 303
+        job_page = client.get(response.headers["location"])
+        assert "Excluded from processing" in job_page.text
+        confirmation_form = re.search(
+            r'action="(?P<url>/jobs/[^\"]+/sources/[^\"]+/layout-confirmation)"',
+            job_page.text,
+        )
+        assert confirmation_form is not None
+        response = client.post(
+            confirmation_form.group("url"),
+            data={"decision": "confirmed"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        job_page = client.get(response.headers["location"])
+        processing_form = re.search(
+            r'action="(?P<url>/jobs/[^\"]+/sources/[^\"]+/processing)"',
+            job_page.text,
+        )
+        assert processing_form is not None
+        client.post(processing_form.group("url"))
         completed_page = client.get(job_url)
 
     assert "2 entries ready for review" in completed_page.text
