@@ -55,11 +55,14 @@ def create_app(
     engine = application_engine(database_url)
     jobs = Jobs(SqlAlchemyJobRepository(engine), LocalSourceFileStore())
     layouts = Layouts(SqlAlchemyJobRepository(engine), LocalLayoutOverlayStore())
-    resolved_register_engine = register_engine or LocalRegisterEngine(
-        anchor_detector=TesseractAnchorDetector(),
-        entry_recognizer=GlmEntryRecognizer(),
-    )
-    processing = Processing(SqlAlchemyJobRepository(engine), resolved_register_engine)
+    entry_recognizer: GlmEntryRecognizer | None = None
+    if register_engine is None:
+        entry_recognizer = GlmEntryRecognizer()
+        register_engine = LocalRegisterEngine(
+            anchor_detector=TesseractAnchorDetector(),
+            entry_recognizer=entry_recognizer,
+        )
+    processing = Processing(SqlAlchemyJobRepository(engine), register_engine)
     resolved_processing_queue = processing_queue or LocalProcessingQueue()
     reviews = Reviews(SqlAlchemyJobRepository(engine))
     exports = Exports(SqlAlchemyJobRepository(engine))
@@ -69,6 +72,8 @@ def create_app(
         upgrade_database(database_url)
         SqlAlchemyJobRepository(engine).recover_interrupted_processing()
         yield
+        if entry_recognizer is not None:
+            entry_recognizer.close()
         engine.dispose()
 
     app = FastAPI(title="Marked Register", lifespan=lifespan)

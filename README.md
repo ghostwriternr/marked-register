@@ -20,14 +20,15 @@ are recorded in [`docs/architecture.md`](docs/architecture.md).
 
 Requires Python 3.12 and `uv`.
 
-The local processing adapter also requires the Tesseract executable. On macOS:
+Local processing also requires the `tesseract` and `llama-server` (llama.cpp)
+executables on `PATH`. For example, on macOS:
 
 ```bash
-brew install tesseract
+brew install tesseract llama.cpp
 ```
 
 ```bash
-uv sync --extra local-ai
+uv sync
 uv run pytest
 uv run ruff check .
 ```
@@ -41,6 +42,10 @@ uv run marked-register
 It listens on `127.0.0.1:8000` and stores the application database under
 `.local/` unless `--database` selects another path. Each review job stores its
 sensitive PDFs and artifacts in the directory chosen in the browser.
+
+The first processing run downloads the GLM-OCR model (about 1.4 GB) into the
+Hugging Face cache. Register data never leaves the machine; the app runs the
+model in its own `llama-server` process on `127.0.0.1`.
 
 The reviewer works entirely in the browser: add PDFs, confirm the polling
 district and annotated layouts, run the serialized local processor, validate

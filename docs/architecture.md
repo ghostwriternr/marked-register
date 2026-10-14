@@ -25,7 +25,10 @@ storage, and execution choices must not leak into them.
 - Queued, running, page-progress, complete, and failed states persist in SQLite.
   Interrupted work becomes an explicit retryable failure after restart; retry
   replaces deterministic artifacts and entry metadata instead of appending rows.
-- GLM-OCR through MLX is the first text recogniser.
+- GLM-OCR is the text recogniser. The application runs it in a private
+  llama.cpp server on the loopback interface, so recognition uses whichever
+  accelerator the installed llama.cpp build supports and needs no
+  platform-specific Python dependencies.
 
 Large binary artifacts are not stored in SQLite. Database records reference
 relative artifact paths and content hashes so a job directory remains movable
@@ -58,7 +61,7 @@ Four narrow internal seams keep that path open:
 | --- | --- | --- |
 | Metadata | SQLite | PostgreSQL |
 | Artifacts | Local filesystem | Private S3-compatible storage |
-| Recognition | MLX GLM-OCR | Audited inference provider |
+| Recognition | GLM-OCR on local llama.cpp | Audited inference provider |
 | Jobs | Local process | Queue-backed worker |
 
 Only local adapters are implemented for the MVP. The application does not add a

@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
-import os
+import base64
+import json
 import re
+import shutil
+import socket
+import subprocess
 import threading
+import time
+import urllib.request
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
-from tempfile import NamedTemporaryFile
-from typing import Literal, Protocol
+from tempfile import TemporaryFile
+from typing import IO, Literal, Protocol
 
 import cv2
 import numpy as np
@@ -27,6 +32,8 @@ from marked_register.domain import (
 _ELECTOR_RE = re.compile(r"^\s*(?P<elector>\d{1,5}(?:/\d{1,2})?)(?:\s+|[-–—]+|(?=[A-Za-z]))")
 _MARKER_RE = re.compile(r"^(?:\d{1,5}(?:/\d{1,2})?)\s*(?P<marker>@A|[A-Z]{1,3})?\b")
 _ANCHOR_RE = re.compile(r"^\d{1,5}(?:/\d{0,2})?$")
+_LLAMA_SERVER_START_TIMEOUT_SECONDS = 30 * 60
+_RECOGNITION_TIMEOUT_SECONDS = 120
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,25 +248,133 @@ class TesseractAnchorDetector:
 
 
 class GlmEntryRecognizer:
-    """MLX GLM-OCR adapter for canonical leading-field recognition."""
+    """GLM-OCR adapter for canonical leading-field recognition.
 
-    model_name = "mlx-community/GLM-OCR-8bit"
+    The model runs in a private llama.cpp server bound to the loopback interface. The server
+    starts on first use, downloading the model into the Hugging Face cache if needed, and
+    stays loaded until `close()`.
+    """
+
+    model_name = "ggml-org/GLM-OCR-GGUF:Q8_0"
     prompt = "Text Recognition:"
 
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._server: _LlamaServer | None = None
+
     def recognize(self, image: np.ndarray, *, detector_label: str) -> EntryRecognition:
-        with NamedTemporaryFile(
-            suffix=".png",
-            prefix="marked-register-ocr-",
-            delete=False,
-        ) as file:
-            path = Path(file.name)
-        try:
-            if not cv2.imwrite(str(path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR)):
-                raise OSError("failed to write OCR input")
-            raw_text = _recognize_image_file(self.model_name, self.prompt, path)
-        finally:
-            path.unlink(missing_ok=True)
+        encoded, png = cv2.imencode(".png", cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+        if not encoded:
+            raise OSError("failed to encode OCR input")
+        image_url = "data:image/png;base64," + base64.b64encode(png.tobytes()).decode("ascii")
+        request = urllib.request.Request(
+            f"{self._server_url()}/v1/chat/completions",
+            data=json.dumps(
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "image_url", "image_url": {"url": image_url}},
+                                {"type": "text", "text": self.prompt},
+                            ],
+                        }
+                    ],
+                    "max_tokens": 128,
+                    "temperature": 0.0,
+                }
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=_RECOGNITION_TIMEOUT_SECONDS) as response:
+            raw_text = json.load(response)["choices"][0]["message"]["content"]
         return parse_entry_recognition(raw_text, detector_label=detector_label)
+
+    def close(self) -> None:
+        with self._lock:
+            if self._server is not None:
+                self._server.stop()
+                self._server = None
+
+    def _server_url(self) -> str:
+        with self._lock:
+            if self._server is None or not self._server.running:
+                if self._server is not None:
+                    self._server.stop()
+                self._server = _LlamaServer.start(self.model_name)
+            return self._server.url
+
+
+@dataclass(frozen=True, slots=True)
+class _LlamaServer:
+    process: subprocess.Popen[bytes]
+    log: IO[bytes]
+    url: str
+
+    @classmethod
+    def start(cls, model: str) -> _LlamaServer:
+        executable = shutil.which("llama-server")
+        if executable is None:
+            raise RuntimeError("llama-server was not found; install llama.cpp")
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        # llama.cpp logs timings and model loading at its default verbosity, never OCR text.
+        log = TemporaryFile()  # noqa: SIM115 - closed by stop() when the server ends.
+        server = cls(
+            process=subprocess.Popen(
+                [
+                    executable,
+                    "-hf",
+                    model,
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                    "--parallel",
+                    "1",
+                    "--ctx-size",
+                    "4096",
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            ),
+            log=log,
+            url=f"http://127.0.0.1:{port}",
+        )
+        deadline = time.monotonic() + _LLAMA_SERVER_START_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if not server.running:
+                reason = server.last_log_line()
+                server.stop()
+                raise RuntimeError(f"llama-server failed to start: {reason}")
+            try:
+                with urllib.request.urlopen(f"{server.url}/health", timeout=5):
+                    return server
+            except OSError:
+                time.sleep(1)
+        server.stop()
+        raise RuntimeError("llama-server did not become ready")
+
+    @property
+    def running(self) -> bool:
+        return self.process.poll() is None
+
+    def last_log_line(self) -> str:
+        self.log.seek(0)
+        lines = self.log.read().decode("utf-8", errors="replace").strip().splitlines()
+        return lines[-1] if lines else f"exit code {self.process.returncode}"
+
+    def stop(self) -> None:
+        if self.running:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()
+        self.log.close()
 
 
 class LocalRegisterEngine:
@@ -666,37 +781,3 @@ def _write_crop(path: Path, image: np.ndarray) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not cv2.imwrite(str(path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR)):
         raise OSError(f"failed to write entry crop: {path}")
-
-
-@lru_cache(maxsize=2)
-def _load_mlx_model(model_name: str):  # type: ignore[no-untyped-def]
-    try:
-        from mlx_vlm import load
-    except ImportError as error:
-        raise RuntimeError(
-            "local AI dependencies are missing; run `uv sync --extra local-ai`"
-        ) from error
-    return load(model_name)
-
-
-def _recognize_image_file(model_name: str, prompt: str, image_path: Path) -> str:
-    try:
-        from mlx_vlm import generate
-        from mlx_vlm.prompt_utils import apply_chat_template
-    except ImportError as error:
-        raise RuntimeError(
-            "local AI dependencies are missing; run `uv sync --extra local-ai`"
-        ) from error
-    model, processor = _load_mlx_model(model_name)
-    formatted_prompt = apply_chat_template(processor, model.config, prompt, num_images=1)
-    result = generate(
-        model,
-        processor,
-        formatted_prompt,
-        image=[os.fspath(image_path)],
-        max_tokens=128,
-        temperature=0.0,
-        repetition_penalty=1.2,
-        verbose=False,
-    )
-    return result.text

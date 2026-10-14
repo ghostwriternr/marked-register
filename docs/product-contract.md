@@ -7,8 +7,8 @@ neutral ledger of electors and visible register marks. It is designed for a
 non-technical reviewer who previously performed the entire task manually on
 paper.
 
-The MVP runs locally on Apple Silicon. Every PDF, rendered page, crop, model
-result, and review decision remains on the operator's machine.
+The MVP runs locally on macOS, Linux, or Windows. Every PDF, rendered page,
+crop, model result, and review decision remains on the operator's machine.
 
 ## Workflow
 
@@ -94,7 +94,6 @@ ignored local configuration.
 - eCanvasser, NationBuilder, or other campaign integrations;
 - official-turnout reconciliation;
 - interactive layout-profile editing;
-- cross-platform support;
 - polished installation or application packaging;
 - hosted processing.
 
